@@ -1,0 +1,26 @@
+# Web API
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Database (Supabase PostgreSQL)
+sqlalchemy
+psycopg2-binary
+
+# Supabase Storage (S3-compatible via boto3)
+boto3
+
+# Data Processing & ML
+pandas
+numpy
+scikit-learn
+scipy
+tqdm
+
+# EVTX Parsing
+evtx2df
+
+# AI & LLM Integration
+google-generativeai
+huggingface-hub
+python-dotenv

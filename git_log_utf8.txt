@@ -1,0 +1,5 @@
+﻿2fa81b4 first commit
+0033d96 Fix: local to db and yea;
+78b5474 FIXED: works the db
+c6f499d lets see;
+b4c2893 First commit
