@@ -1,0 +1,1011 @@
+{
+    "_terminal_summary": "\n==================================================================================\n  \ud83d\udee1\ufe0f  SOC DETECTION SYSTEM  v3.6  \u2014  MESSAGE-FREE EVTX EDITION\n==================================================================================\n  \ud83d\udcc1 File : E:\\dsciml\\dsciml\\ml_backend\\temp_uploads\\soc_diverse_100k.csv\n  \ud83d\udcca Logs : 100,000\n==================================================================================\n  \ud83d\udcca Columns : ['timestamp', 'event_id', 'User', 'opcode', 'task_category', 'computer', 'source', 'detail', 'Message', 'Brief', 'Id', 'Version', 'Qualifiers', 'Level', 'Task', 'Opcode', 'Keywords', 'RecordId', 'ProviderName', 'ProviderId', 'LogName', 'ProcessId', 'ThreadId', 'MachineName', 'UserId', 'TimeCreated', 'ActivityId', 'RelatedActivityId', 'ContainerLog', 'MatchedQueryIds', 'Bookmark', 'LevelDisplayName', 'OpcodeDisplayName', 'TaskDisplayName', 'KeywordsDisplayNames', 'Properties', 'SecurityID', 'AccountName', 'AccountDomain', 'LogonID', 'ReadOperation', 'ip', 'label']\n  \u2705 Mapped Columns: ['timestamp', 'event_id', 'user', 'opcode', 'task_category', 'computer', 'source', 'detail', 'message', 'brief', 'id', 'version', 'qualifiers', 'level', 'task', 'opcode', 'keywords', 'recordid', 'providername', 'providerid', 'logname', 'processid', 'threadid', 'machinename', 'userid', 'timecreated', 'activityid', 'relatedactivityid', 'containerlog', 'matchedqueryids', 'bookmark', 'leveldisplayname', 'opcodedisplayname', 'taskdisplayname', 'keywordsdisplaynames', 'properties', 'securityid', 'accountname', 'accountdomain', 'logonid', 'readoperation', 'ip', 'label', 'logged', 'event ID', 'User', 'Opcode', 'OpcodeDisplay', 'task Category', 'LogName', 'AccountDomain', 'process_id']\n  \ud83d\udd0d Running temporal correlation passes...\n  \ud83d\udd20 Vectorizing classifications...\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  \ud83d\udea8 RULE-BASED DETECTION  (structural fields only \u2014 no Message column)\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  Attack Category                Tactic                   MITRE    Risk     Count\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  Brute Force                    Credential Access        T1110       6        80\n  Malware \u2014 Mimikatz             Credential Access        T1003      10         4\n  Ransomware \u2014 Encryption        Impact                   T1486      10         1\n  Ransomware \u2014 Anti-Recovery     Impact                   T1490      10         1\n  Log Tampering                  Defense Evasion          T1070      10         1\n  Privilege Escalation           Privilege Escalation     T1078       9         1\n  Network Recon                  Discovery                T1046       5         1\n  Service Installation           Persistence              T1543       8         1\n  Lateral Movement               Lateral Movement         T1021       8         1\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  \ud83d\udd34 Total Threats         : 91\n  \ud83d\udfe2 Normal Activity       : 99,909\n  \ud83d\udd25 Cumulative Risk Score : 580\n  \ud83d\udcca Threat Density        : 5.8 risk-pts / 1,000 logs\n  \ud83d\udcd0 Normalized Density    : 0.64 risk-pts / 1,000 logs / rule\n  \ud83d\udccb Active Rule Count     : 9\n\n==================================================================================\n  \ud83e\udd16 ML VALIDATION  (Isolation Forest \u2014 behavioral sequences)\n==================================================================================\n  \u26a1 Massive dataset detected. Sampling 50,000 rows for ML speed...\n  \u2705 ML flagged         : 163 anomalous 1-min windows\n  \ud83d\udccf Rule-flagged windows: 10\n  \ud83e\udd1d Rule-ML Agreement  : 40.0%\n     \u2192 Moderate agreement: ML is finding patterns rules miss (investigate)\n\n==================================================================================\n  \u23f1\ufe0f  ATTACK TIMELINE  (highest-risk event per minute)\n==================================================================================\n  [2026-03-21 00:27]  Ransomware \u2014 Encryption       \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 R10  \ud83d\udda5 RohithLap         \ud83d\udc64 admin\n  [2026-03-21 03:14]  Log Tampering                 \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 R10  \ud83d\udda5 RohithLap         \ud83d\udc64 admin\n  [2026-03-21 06:01]  Network Recon                 \u2588\u2588\u2588\u2588\u2588\u2591\u2591\u2591\u2591\u2591 R5   \ud83d\udda5 RohithLap         \ud83d\udc64 user1\n  [2026-03-21 08:47]  Privilege Escalation          \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2591 R9   \ud83d\udda5 Workstation-A     \ud83d\udc64 admin\n  [2026-03-21 11:34]  Service Installation          \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2591\u2591 R8   \ud83d\udda5 RohithLap         \ud83d\udc64 SYSTEM\n  [2026-03-21 14:21]  Malware \u2014 Mimikatz            \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 R10  \ud83d\udda5 RohithLap         \ud83d\udc64 admin\n  [2026-03-21 17:07]  Malware \u2014 Mimikatz            \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 R10  \ud83d\udda5 RohithLap         \ud83d\udc64 admin\n  [2026-03-21 19:54]  Malware \u2014 Mimikatz            \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 R10  \ud83d\udda5 RohithLap         \ud83d\udc64 admin\n  [2026-03-21 22:41]  Malware \u2014 Mimikatz            \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 R10  \ud83d\udda5 RohithLap         \ud83d\udc64 admin\n\n==================================================================================\n  \ud83d\udd17 ATTACK CHAIN DETECTION  (per-host kill-chain matcher)\n==================================================================================\n  \ud83d\udea8 CHAIN on RohithLap:\n     [00:27] Ransomware \u2014 Encryption \u2192 [00:27] Ransomware \u2014 Anti-Recovery\n\n==================================================================================\n  \ud83c\udf0d IMPOSSIBLE TRAVEL  (same user, different host, \u22645 min)\n==================================================================================\n  NOTE: Proxy/NAT false positives possible \u2014 whitelist known jump boxes\n\n  \ud83d\udea8 IMPOSSIBLE TRAVEL \u2014 admin\n     First seen : [08:47:56] Workstation-B\n                  [08:47:56] Workstation-A  (0.0 min apart)\n     Hosts      : Workstation-A, Workstation-B\n     Events     : 1 impossible transitions detected\n\n",
+    "_meta": {
+        "generated_at": "2026-03-20T22:21:36.969393",
+        "total_logs": 100000,
+        "total_threats": 91,
+        "risk_score": 580,
+        "threat_density": 5.8,
+        "normalized_density": 0.64,
+        "active_rules": 9,
+        "rule_ml_agreement": "40.0%"
+    },
+    "_attack_chains": [
+        {
+            "computer": "RohithLap",
+            "chain": "[00:27] Ransomware \u2014 Encryption \u2192 [00:27] Ransomware \u2014 Anti-Recovery"
+        }
+    ],
+    "_impossible_travel": [
+        {
+            "user": "admin",
+            "host_a": "Workstation-B",
+            "time_a": "2026-03-21 08:47:56",
+            "host_b": "Workstation-A",
+            "time_b": "2026-03-21 08:47:56",
+            "gap_min": 0.0
+        }
+    ],
+    "Brute Force": {
+        "mitre_id": "T1110",
+        "tactic": "Credential Access",
+        "risk_score": 6,
+        "count": 80,
+        "events": [
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4625,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1110",
+                "Tactic": "Credential Access",
+                "RiskScore": 6
+            }
+        ]
+    },
+    "Lateral Movement": {
+        "mitre_id": "T1021",
+        "tactic": "Lateral Movement",
+        "risk_score": 8,
+        "count": 1,
+        "events": [
+            {
+                "logged": "2026-03-21 08:47:56",
+                "event ID": 4624,
+                "User": "admin",
+                "computer": "Workstation-B",
+                "task Category": "Security",
+                "MitreID": "T1021",
+                "Tactic": "Lateral Movement",
+                "RiskScore": 8
+            }
+        ]
+    },
+    "Log Tampering": {
+        "mitre_id": "T1070",
+        "tactic": "Defense Evasion",
+        "risk_score": 10,
+        "count": 1,
+        "events": [
+            {
+                "logged": "2026-03-21 03:14:36",
+                "event ID": 1102,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1070",
+                "Tactic": "Defense Evasion",
+                "RiskScore": 10
+            }
+        ]
+    },
+    "Malware \u2014 Mimikatz": {
+        "mitre_id": "T1003",
+        "tactic": "Credential Access",
+        "risk_score": 10,
+        "count": 4,
+        "events": [
+            {
+                "logged": "2026-03-21 14:21:16",
+                "event ID": 4688,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1003",
+                "Tactic": "Credential Access",
+                "RiskScore": 10
+            },
+            {
+                "logged": "2026-03-21 17:07:56",
+                "event ID": 4688,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1003",
+                "Tactic": "Credential Access",
+                "RiskScore": 10
+            },
+            {
+                "logged": "2026-03-21 19:54:36",
+                "event ID": 4688,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1003",
+                "Tactic": "Credential Access",
+                "RiskScore": 10
+            },
+            {
+                "logged": "2026-03-21 22:41:16",
+                "event ID": 4688,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1003",
+                "Tactic": "Credential Access",
+                "RiskScore": 10
+            }
+        ]
+    },
+    "Network Recon": {
+        "mitre_id": "T1046",
+        "tactic": "Discovery",
+        "risk_score": 5,
+        "count": 1,
+        "events": [
+            {
+                "logged": "2026-03-21 06:01:16",
+                "event ID": 3,
+                "User": "user1",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1046",
+                "Tactic": "Discovery",
+                "RiskScore": 5
+            }
+        ]
+    },
+    "Privilege Escalation": {
+        "mitre_id": "T1078",
+        "tactic": "Privilege Escalation",
+        "risk_score": 9,
+        "count": 1,
+        "events": [
+            {
+                "logged": "2026-03-21 08:47:56",
+                "event ID": 4624,
+                "User": "admin",
+                "computer": "Workstation-A",
+                "task Category": "Security",
+                "MitreID": "T1078",
+                "Tactic": "Privilege Escalation",
+                "RiskScore": 9
+            }
+        ]
+    },
+    "Ransomware \u2014 Anti-Recovery": {
+        "mitre_id": "T1490",
+        "tactic": "Impact",
+        "risk_score": 10,
+        "count": 1,
+        "events": [
+            {
+                "logged": "2026-03-21 00:27:56",
+                "event ID": 4688,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1490",
+                "Tactic": "Impact",
+                "RiskScore": 10
+            }
+        ]
+    },
+    "Ransomware \u2014 Encryption": {
+        "mitre_id": "T1486",
+        "tactic": "Impact",
+        "risk_score": 10,
+        "count": 1,
+        "events": [
+            {
+                "logged": "2026-03-21 00:27:56",
+                "event ID": 4688,
+                "User": "admin",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1486",
+                "Tactic": "Impact",
+                "RiskScore": 10
+            }
+        ]
+    },
+    "Service Installation": {
+        "mitre_id": "T1543",
+        "tactic": "Persistence",
+        "risk_score": 8,
+        "count": 1,
+        "events": [
+            {
+                "logged": "2026-03-21 11:34:36",
+                "event ID": 7045,
+                "User": "SYSTEM",
+                "computer": "RohithLap",
+                "task Category": "Security",
+                "MitreID": "T1543",
+                "Tactic": "Persistence",
+                "RiskScore": 8
+            }
+        ]
+    }
+}

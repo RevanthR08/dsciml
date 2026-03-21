@@ -1,6 +1,7 @@
 import shutil
 import subprocess
 import os
+import traceback
 import uuid as _uuid
 import glob
 
@@ -14,7 +15,13 @@ from sqlalchemy import func, desc, text
 
 from database import SessionLocal, get_db
 from db_models import (
-    Scan, AnomalyCategory, AnomalousEvent, AttackChain, ImpossibleTravel,
+    Scan,
+    AnomalyCategory,
+    AnomalousEvent,
+    AttackChain,
+    ImpossibleTravel,
+    IngestedLog,
+    AndroidLog,
 )
 from db_persist import persist_scan_report
 from ai_intelligence import SecurityAI
@@ -101,7 +108,11 @@ async def upload_file(file: UploadFile = File(...)):
     """
     Upload a log file for analysis.
     Accepts both .csv and .evtx (Windows Event Log) formats.
-    Files are saved locally for the pipeline and also uploaded to your Supabase Storage bucket.
+    Always writes a local copy under temp_uploads/ first (for POST /scans), then uploads
+    to Supabase Storage when bucket credentials are configured.
+
+    Local testing without Storage: set env ``ALLOW_UPLOAD_WITHOUT_STORAGE=1`` — file is
+    still saved under temp_uploads/; ``storage_skipped`` will be true in the response.
     """
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -116,6 +127,21 @@ async def upload_file(file: UploadFile = File(...)):
     with open(raw_path, "wb") as buf:
         shutil.copyfileobj(file.file, buf)
 
+    allow_local_only = os.getenv("ALLOW_UPLOAD_WITHOUT_STORAGE", "").lower() in (
+        "1", "true", "yes",
+    )
+
+    if not _storage_ok():
+        if not allow_local_only:
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "Supabase Storage is not configured.",
+                    "fix": "Set Bucket_Key, Bucket_Access_Key, and Bucket_Secret_Key in .env, "
+                    "or set ALLOW_UPLOAD_WITHOUT_STORAGE=1 for local testing (temp_uploads only).",
+                },
+            )
+
     bucket_path = None
     if ext == ".evtx":
         csv_filename = file.filename.rsplit(".", 1)[0] + ".csv"
@@ -129,7 +155,17 @@ async def upload_file(file: UploadFile = File(...)):
 
         final_path = os.path.abspath(csv_path)
         object_name = f"logs/{csv_filename}"
-        storage = _upload_to_supabase(final_path, object_name)
+        storage = (
+            _upload_to_supabase(final_path, object_name)
+            if _storage_ok()
+            else {"bucket_path": None, "public_url": None}
+        )
+        if not storage.get("bucket_path"):
+            if not (allow_local_only or not _storage_ok()):
+                raise HTTPException(
+                    status_code=503,
+                    detail="Upload to storage bucket failed after EVTX conversion. Check credentials and bucket name.",
+                )
         os.environ["SOC_LOG_FILE"] = final_path
         return {
             "message": f"EVTX converted successfully ({row_count:,} records)",
@@ -138,19 +174,31 @@ async def upload_file(file: UploadFile = File(...)):
             "file_path": final_path,
             "file_type": "evtx",
             "bucket": BUCKET_NAME,
+            "storage_skipped": not _storage_ok() or not storage.get("bucket_path"),
             **storage,
             "next_step": "Call POST /scans to analyze.",
         }
 
     final_path = os.path.abspath(raw_path)
     object_name = f"logs/{file.filename}"
-    storage = _upload_to_supabase(final_path, object_name)
+    storage = (
+        _upload_to_supabase(final_path, object_name)
+        if _storage_ok()
+        else {"bucket_path": None, "public_url": None}
+    )
+    if not storage.get("bucket_path"):
+        if not (allow_local_only or not _storage_ok()):
+            raise HTTPException(
+                status_code=503,
+                detail="Upload to storage bucket failed. Check Bucket_Key, keys, and Bucket_Name in .env.",
+            )
     os.environ["SOC_LOG_FILE"] = final_path
     return {
         "message": f"Uploaded {file.filename}",
         "file_path": final_path,
         "file_type": "csv",
         "bucket": BUCKET_NAME,
+        "storage_skipped": not _storage_ok() or not storage.get("bucket_path"),
         **storage,
         "next_step": "Call POST /scans to analyze.",
     }
@@ -212,6 +260,10 @@ def create_scan(background_tasks: BackgroundTasks, body: dict = None):
         file_path = body["file_path"]
     else:
         file_path = os.getenv("SOC_LOG_FILE")
+        if not file_path or not os.path.exists(file_path):
+            files = glob.glob(os.path.join(UPLOAD_DIR, "*.csv"))
+            if files:
+                file_path = max(files, key=os.path.getctime)
 
     if not file_path or not os.path.exists(file_path):
         available = [f for f in os.listdir(UPLOAD_DIR) if f.endswith(".csv")] \
@@ -228,20 +280,42 @@ def create_scan(background_tasks: BackgroundTasks, body: dict = None):
     def run_pipeline(path: str):
         env = os.environ.copy()
         env["SOC_LOG_FILE"] = path
-        subprocess.run(["python", "forensic_report.py", path], env=env)
+        
+        target_script = "forensic_report.py"
+        try:
+            with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                header = f.readline().lower()
+                if all(col in header for col in ['score', 'payload', 'root'][-1:]): # Relaxed check in case of variations
+                    pass 
+                if 'score' in header and 'root' in header and 'ram' in header:
+                    target_script = "forensic_android.py"
+        except Exception:
+            pass
+
+        subprocess.run(["python", target_script, path], env=env)
 
         report_path = _latest_report_path()
         if not report_path:
             return
 
+        log_platform = "android" if target_script == "forensic_android.py" else "windows"
+
         db = SessionLocal()
         try:
             scan = persist_scan_report(
-                db, report_path, source_file_name=os.path.basename(path)
+                db,
+                report_path,
+                source_file_name=os.path.basename(path),
+                source_csv_path=path if path.lower().endswith(".csv") else None,
+                log_platform=log_platform,
             )
             briefing = ai_engine.process_full_report()
             scan.ai_briefing = briefing
             db.commit()
+        except Exception:
+            db.rollback()
+            print("[scan pipeline] Database persist failed:", flush=True)
+            traceback.print_exc()
         finally:
             db.close()
 
@@ -297,6 +371,12 @@ def get_scan(scan_id: str, db: Session = Depends(get_db)):
     travel_count = db.query(func.count(ImpossibleTravel.travel_id)).filter(
         ImpossibleTravel.scan_id == scan.scan_id
     ).scalar()
+    ingested_count = db.query(func.count(IngestedLog.log_row_id)).filter(
+        IngestedLog.scan_id == scan.scan_id
+    ).scalar()
+    android_log_count = db.query(func.count(AndroidLog.android_log_id)).filter(
+        AndroidLog.scan_id == scan.scan_id
+    ).scalar()
 
     return {
         **scan.to_dict(),
@@ -304,6 +384,8 @@ def get_scan(scan_id: str, db: Session = Depends(get_db)):
         "categories": [c.to_dict() for c in categories],
         "attack_chain_count": chain_count,
         "impossible_travel_count": travel_count,
+        "ingested_log_count": ingested_count or 0,
+        "android_log_count": android_log_count or 0,
     }
 
 
@@ -367,6 +449,40 @@ def get_scan_events(
 
     events = [evt.to_dict(category_name=cat_name) for evt, cat_name in rows]
     return {"total": total, "limit": limit, "offset": offset, "events": events}
+
+
+@app.get("/scans/{scan_id}/ingested-logs")
+def get_scan_ingested_logs(
+    scan_id: str,
+    label: str = Query(
+        None,
+        description="Filter by dataset label, e.g. normal, suspicious, anomalous",
+    ),
+    limit: int = Query(500, ge=1, le=10000),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """
+    Full source log rows for this scan (normal + anomalous). Use *label* to
+    segregate rows that came from the CSV `label` column.
+    """
+    scan = _resolve_scan(scan_id, db)
+    q = db.query(IngestedLog).filter(IngestedLog.scan_id == scan.scan_id)
+    if label:
+        q = q.filter(IngestedLog.label == label.strip().lower())
+    total = q.count()
+    rows = (
+        q.order_by(IngestedLog.logged_at)
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "logs": [r.to_dict() for r in rows],
+    }
 
 
 @app.get("/scans/{scan_id}/chains")
@@ -447,6 +563,25 @@ def dashboard_stats(db: Session = Depends(get_db)):
         "average_risk_score": round(float(avg_risk), 1),
         "highest_risk_score": max_risk,
     }
+
+
+# ━━━ Administration ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+from migrations.databasecleanup import clean_database
+
+@app.post("/admin/cleanup")
+def wipe_database():
+    """
+    Truncates all rows in application tables (schema preserved) and empties the storage bucket.
+    """
+    try:
+        clean_database()
+        return {
+            "status": "success",
+            "message": "All table data cleared (schema unchanged); bucket empty attempted.",
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

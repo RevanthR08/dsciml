@@ -17,27 +17,20 @@ else:
 IMPOSSIBLE_TRAVEL_MAX_TRANSITIONS = 50
 
 THREAT_METADATA = {
-    'Brute Force':              {'MitreID': 'T1110', 'Tactic': 'Credential Access',    'Risk': 6},
-    'Brute Force — Succeeded':  {'MitreID': 'T1110', 'Tactic': 'Credential Access',    'Risk': 9},
-    'Privilege Escalation':     {'MitreID': 'T1078', 'Tactic': 'Privilege Escalation', 'Risk': 9},
-    'Suspicious Process Exec':  {'MitreID': 'T1059', 'Tactic': 'Execution',            'Risk': 7},
-    'Malware — Persistence':    {'MitreID': 'T1547', 'Tactic': 'Persistence',          'Risk': 8},
-    'Malware — Mimikatz':       {'MitreID': 'T1003', 'Tactic': 'Credential Access',    'Risk': 10},
-    'Malware — Suspicious Execution': {'MitreID': 'T1204', 'Tactic': 'Execution',        'Risk': 9},
-    'Ransomware — Encryption':  {'MitreID': 'T1486', 'Tactic': 'Impact',               'Risk': 10},
-    'Ransomware — Anti-Recovery':{'MitreID': 'T1490', 'Tactic': 'Impact',               'Risk': 10},
-    'Log Tampering':            {'MitreID': 'T1070', 'Tactic': 'Defense Evasion',      'Risk': 10},
-    'Lateral Movement':         {'MitreID': 'T1021', 'Tactic': 'Lateral Movement',     'Risk': 8},
-    'Phishing — Anomalous Flow': {'MitreID': 'T1566', 'Tactic': 'Initial Access',       'Risk': 7},
-    'Suspicious DNS Query':     {'MitreID': 'T1071', 'Tactic': 'Command & Control',    'Risk': 7},
-    'Guest Account Activity':   {'MitreID': 'T1078', 'Tactic': 'Initial Access',       'Risk': 8},
-    'Network Recon':            {'MitreID': 'T1046', 'Tactic': 'Discovery',            'Risk': 5},
-    'Service Installation':     {'MitreID': 'T1543', 'Tactic': 'Persistence',          'Risk': 8},
-    'Service Failure':          {'MitreID': 'T1489', 'Tactic': 'Impact',               'Risk': 6},
-    'DNS Reconnaissance':       {'MitreID': 'T1590', 'Tactic': 'Reconnaissance',       'Risk': 5},
-    'Bluetooth Exfiltration':   {'MitreID': 'T1011', 'Tactic': 'Exfiltration',         'Risk': 9},
-    'Insider Theft':            {'MitreID': 'T1052', 'Tactic': 'Exfiltration',         'Risk': 9},
-    'Normal':                   {'MitreID': 'None',  'Tactic': 'None',                 'Risk': 0},
+    'Ransomware — Encryption':        {'MitreID': 'T1486', 'Tactic': 'Impact',               'Risk': 10},
+    'Ransomware — Anti-Recovery':     {'MitreID': 'T1490', 'Tactic': 'Impact',               'Risk': 10},
+    'Malware — Mimikatz':             {'MitreID': 'T1003', 'Tactic': 'Credential Access',    'Risk': 10},
+    'Malware — Suspicious Execution': {'MitreID': 'T1204', 'Tactic': 'Execution',            'Risk': 9},
+    'Brute Force':                    {'MitreID': 'T1110', 'Tactic': 'Credential Access',    'Risk': 6},
+    'Privilege Escalation':           {'MitreID': 'T1078', 'Tactic': 'Privilege Escalation', 'Risk': 9},
+    'Suspicious Process Exec':        {'MitreID': 'T1059', 'Tactic': 'Execution',            'Risk': 7},
+    'Network Recon':                  {'MitreID': 'T1046', 'Tactic': 'Discovery',            'Risk': 5},
+    'Suspicious DNS Query':           {'MitreID': 'T1071', 'Tactic': 'Command & Control',    'Risk': 7},
+    'Bluetooth Exfiltration':         {'MitreID': 'T1011', 'Tactic': 'Exfiltration',         'Risk': 9},
+    'Log Tampering':                  {'MitreID': 'T1070', 'Tactic': 'Defense Evasion',      'Risk': 10},
+    'Service Installation':           {'MitreID': 'T1543', 'Tactic': 'Persistence',          'Risk': 8},
+    'Lateral Movement':               {'MitreID': 'T1021', 'Tactic': 'Lateral Movement',     'Risk': 8},
+    'Normal':                         {'MitreID': 'None',  'Tactic': 'None',                 'Risk': 0},
 }
 
 ADMIN_ACCOUNTS = {'CORP\\Administrator', 'NT AUTHORITY\\SYSTEM'}
@@ -59,79 +52,58 @@ SYSTEM_ACCOUNTS = {
     '',
 }
 
-# 🛠️ ADVANCED SIGNATURE PATTERNS
-RANSOMWARE_EXT = ('.locked', '.encrypted', '.wncry', '.crypt', '.locky', '.cerber', '.zepto', '.aesir', '.thor', '.zzzzz', '.aes', '.enc', '.darkside', '.conti', '.revil')
-MALWARE_PROCESSES = ('mimikatz', 'psexec', 'nc.exe', 'cobaltstrike', 'metasploit', 'bloodhound', 'sharphound', 'remcos', 'nanocore', 'njrat', 'anydesk', 'teamviewer')
-PERSISTENCE_CMD = ('reg add', 'schtasks', 'wmic', 'sc create', 'startup', 'currentversion\\run')
-PHISHING_INDICATORS = ('bit.ly', 'tinyurl.com', 'login-verification', 'secure-update', 'account-blocked', 'invoice', 'payment', 'urgent')
+def classify_vectorized(df):
+    """Vectorized classification using the simplified, real-threat-only label set."""
+    df['AttackCategory'] = 'Normal'
 
-def classify_row(eid, user, opcode, task_cat, source, detail=''):
-    eid      = int(eid) if str(eid).isdigit() else -1
-    user     = str(user).strip()
-    opcode   = str(opcode).strip().lower()
-    task_cat = str(task_cat).strip().lower()
-    source   = str(source).strip().lower()
-    msg      = str(detail).lower()
+    eid = pd.to_numeric(df['event ID'], errors='coerce').fillna(-1).astype(int)
+    user = df['User'].astype(str).str.lower()
 
-    # 🚨 RANSOMWARE SIGNATURES
-    if any(ext in msg for ext in RANSOMWARE_EXT) or 'encrypt' in msg:
-        if 'process' in msg or 'file' in msg:
-            return 'Ransomware — Encryption'
-    if 'vssadmin' in msg and 'delete' in msg and 'shadows' in msg:
-        return 'Ransomware — Anti-Recovery'
-    if 'wbadmin' in msg and 'delete' in msg:
-        return 'Ransomware — Anti-Recovery'
-    if 'bcdedit' in msg and 'recoveryenabled' in msg and 'no' in msg:
-        return 'Ransomware — Anti-Recovery'
+    detail = df.get('detail', pd.Series('', index=df.index)).astype(str).str.lower()
+    message = df.get('Message', pd.Series('', index=df.index)).astype(str).str.lower()
+    brief = df.get('Brief', pd.Series('', index=df.index)).astype(str).str.lower()
 
-    # 🚨 MALWARE SIGNATURES
-    if any(p in msg for p in MALWARE_PROCESSES):
-        return 'Malware — Mimikatz' if 'mimikatz' in msg else 'Suspicious Process Exec'
-    if eid == 1 and ('powershell' in msg or 'cmd.exe' in msg) and ('-enc' in msg or '-encodedcommand' in msg or 'bypass' in msg):
-        return 'Malware — Persistence'
-    if any(cmd in msg for cmd in PERSISTENCE_CMD):
-        return 'Malware — Persistence'
-    if 'temp' in msg and ('.exe' in msg or '.scr' in msg or '.vbs' in msg) and eid == 1:
-        return 'Malware — Suspicious Execution'
+    combined = detail + " " + message + " " + brief
 
-    # 🚨 PHISHING SIGNATURES
-    if any(ind in msg for ind in PHISHING_INDICATORS):
-        if 'http' in msg or 'click' in msg:
-            return 'Phishing — Anomalous Flow'
-    if eid == 4624 and 'external' in msg:
-        return 'Phishing — Anomalous Flow'
-    
-    # 🚨 LEGACY LOGIC
-    if eid == 1102:
-        return 'Log Tampering'
-    if eid == 4625:
-        return 'Brute Force'
-    if eid == 4624 and user in ADMIN_ACCOUNTS:
-        return 'Privilege Escalation'
-    if user in GUEST_ACCOUNTS and eid in (4624, 3, 1):
-        return 'Guest Account Activity'
-    if eid == 1 and 'process create' in task_cat and user not in {'NT AUTHORITY\\SYSTEM'}:
-        return 'Suspicious Process Exec'
-    if eid == 22:
-        return 'Suspicious DNS Query'
-    if eid == 1014:
-        return 'DNS Reconnaissance'
-    if eid == 3 and user in ADMIN_ACCOUNTS | GUEST_ACCOUNTS:
-        return 'Network Recon'
-    if eid == 7045:
-        return 'Service Installation'
-    if eid == 7000:
-        return 'Service Failure'
-    if eid == 18:
-        return 'Bluetooth Exfiltration'
-    if eid == 24635:
-        return 'Insider Theft'
-    
-    # 🚨 PHISHING / ANOMALY (Heuristic)
-    if eid == 4624 and 'external' in msg:
-        return 'Phishing — Anomalous Flow'
-    
-    return 'Normal'
+    # -------------------------
+    # 🔴 HIGH PRIORITY (Ransomware)
+    # -------------------------
+    df.loc[combined.str.contains(r'encrypt|\.locked|\.enc', na=False), 'AttackCategory'] = 'Ransomware — Encryption'
+    df.loc[combined.str.contains(r'vssadmin|shadow copy|wbadmin', na=False), 'AttackCategory'] = 'Ransomware — Anti-Recovery'
+
+    # -------------------------
+    # 🔴 MALWARE
+    # -------------------------
+    df.loc[combined.str.contains('mimikatz', na=False), 'AttackCategory'] = 'Malware — Mimikatz'
+    df.loc[combined.str.contains(r'powershell.*-enc|cmd.exe.*temp', na=False), 'AttackCategory'] = 'Malware — Suspicious Execution'
+
+    # -------------------------
+    # 🟠 AUTH ATTACKS
+    # -------------------------
+    df.loc[eid == 4625, 'AttackCategory'] = 'Brute Force'
+    df.loc[(eid == 4624) & (df['User'].isin(['admin', 'CORP\\Administrator'])), 'AttackCategory'] = 'Privilege Escalation'
+
+    # -------------------------
+    # 🟡 PROCESS ABUSE
+    # -------------------------
+    df.loc[(eid == 4688) & 
+           combined.str.contains('powershell|cmd.exe', na=False) & 
+           (~df['User'].str.contains('system|network service', case=False)), 'AttackCategory'] = 'Suspicious Process Exec'
+
+    # -------------------------
+    # 🟡 NETWORK / EXFIL
+    # -------------------------
+    df.loc[eid == 3, 'AttackCategory'] = 'Network Recon'
+    df.loc[eid == 22, 'AttackCategory'] = 'Suspicious DNS Query'
+    df.loc[eid == 18, 'AttackCategory'] = 'Bluetooth Exfiltration'
+
+    # -------------------------
+    # 🟡 SYSTEM EVENTS
+    # -------------------------
+    df.loc[eid == 1102, 'AttackCategory'] = 'Log Tampering'
+    df.loc[eid == 7045, 'AttackCategory'] = 'Service Installation'
+
+    return df
 
 
 def detect_bruteforce_success(df, window_minutes=10):
@@ -263,29 +235,51 @@ def run_forensic_analysis():
         
         # ⚡ Mapping logic: find which CSV column matches our internal requirement
         COL_MAP = {
-            'logged':        next((c for c in df.columns if c in ['logged', 'timegenerated', 'systemtime', 'timestamp']), None),
-            'event id':      next((c for c in df.columns if c in ['event id', 'eventid', 'event_type']),                   None),
-            'user':          next((c for c in df.columns if c in ['user', 'userid']),                        None),
-            'opcode':        next((c for c in df.columns if c in ['opcode', 'app_name']),                                   None),
-            'task category': next((c for c in df.columns if c in ['task category', 'taskcategory', 'task', 'event_type']), None),
-            'computer':      next((c for c in df.columns if c in ['computer', 'device_id']),                                 None),
-            'source':        next((c for c in df.columns if c in ['source', 'provider', 'name']),            None),
+            'logged':         next((c for c in df.columns if c in ['logged', 'timegenerated', 'systemtime', 'timestamp']), None),
+            'event_id':       next((c for c in df.columns if c in ['event_id', 'event id', 'eventid', 'event_type']),      None),
+            'user':           next((c for c in df.columns if c in ['user', 'userid']),                                    None),
+            'opcode':         next((c for c in df.columns if c in ['opcode', 'app_name']),                                None),
+            'opcode_display': next((c for c in df.columns if c in ['opcodedisplayname', 'opcode display name', 'opcodedisplay']), None),
+            'task_category':  next((c for c in df.columns if c in ['task_category', 'task category', 'taskcategory', 'task', 'event_type']), None),
+            'log_name':       next((c for c in df.columns if c in ['logname', 'log name', 'channel']),                    None),
+            'account_domain': next((c for c in df.columns if c in ['accountdomain', 'account domain']),                   None),
+            'computer':       next((c for c in df.columns if c in ['computer', 'device_id']),                             None),
+            'source':         next((c for c in df.columns if c in ['source', 'provider', 'name']),                        None),
+            'process_id':     next((c for c in df.columns if c in ['processid', 'process_id', 'pid', 'execution processid']), None),
         }
         
-        missing = [k for k, v in COL_MAP.items() if v is None and k not in ('source',)]
+        optional = ('source', 'opcode_display', 'log_name', 'account_domain')
+        missing = [k for k, v in COL_MAP.items() if v is None and k not in optional]
         if missing:
             print(f"  ❌ Missing columns: {missing}  |  Found: {df.columns.tolist()}")
             return
 
         # ⚡ Map to the legacy names used by detection functions
-        df['logged'] = df[COL_MAP['logged']]
-        df['event ID'] = df[COL_MAP['event id']]
-        df['User'] = df[COL_MAP['user']]
-        df['Opcode'] = df[COL_MAP['opcode']]
-        df['task Category'] = df[COL_MAP['task category']]
-        df['computer'] = df[COL_MAP['computer']]
+        def _get_col(key):
+            col_name = COL_MAP.get(key)
+            if not col_name: return pd.Series('', index=df.index)
+            val = df[col_name]
+            if isinstance(val, pd.DataFrame):
+                # If duplicates exist (e.g. 'opcode' vs 'Opcode'), pick the last one
+                # The user noted the first one can be non-numeric 'info' string.
+                return val.iloc[:, -1]
+            return val
+
+        df['logged'] = _get_col('logged')
+        df['event ID'] = _get_col('event_id')
+        df['User'] = _get_col('user')
+        df['Opcode'] = _get_col('opcode')
+        if COL_MAP['opcode_display']:
+            df['OpcodeDisplay'] = _get_col('opcode_display')
+        else:
+            df['OpcodeDisplay'] = df['Opcode']
+        df['task Category'] = _get_col('task_category')
+        df['LogName'] = _get_col('log_name') if COL_MAP['log_name'] else pd.Series('', index=df.index)
+        df['AccountDomain'] = _get_col('account_domain') if COL_MAP['account_domain'] else pd.Series('', index=df.index)
+        df['computer'] = _get_col('computer')
         if COL_MAP['source']:
-            df['source'] = df[COL_MAP['source']]
+            df['source'] = _get_col('source')
+        df['process_id'] = _get_col('process_id')
         
         print(f"  ✅ Mapped Columns: {df.columns.tolist()}")
 
@@ -313,65 +307,25 @@ def run_forensic_analysis():
             print("  ⚠️ Warning: No valid timestamps found. Detection could not proceed.")
             return
 
-        for col in ('Opcode', 'task Category', 'source', 'User'):
+        for col in ('Opcode', 'OpcodeDisplay', 'task Category', 'LogName', 'AccountDomain', 'source', 'User'):
             df[col] = df.get(col, pd.Series('', index=df.index)).fillna('')
+
+        u = df['User'].astype(str)
+        empty_ad = df['AccountDomain'].astype(str).str.len() == 0
+        df.loc[empty_ad, 'AccountDomain'] = np.where(
+            u.str.contains('\\', regex=False),
+            u.str.split('\\').str[0],
+            '',
+        )
 
         print("  🔍 Running temporal correlation passes...")
         bf_fail_keys, bf_success_keys = detect_bruteforce_success(df)
         lateral_indices = detect_lateral_movement(df)
 
         print("  🔠 Vectorizing classifications...")
-        # 🟢 Baseline categorization
-        df['AttackCategory'] = 'Normal'
+        df = classify_vectorized(df)
 
-        # Convert columns to simple types for fast comparison
-        eid_series = pd.to_numeric(df['event ID'], errors='coerce').fillna(-1).astype(int)
-        user_series = df['User'].astype(str).str.strip()
-        task_cat_series = df['task Category'].astype(str).str.strip().str.lower()
-        
-        # ⚡ Applying rules using vectorized masks (Fastest way in Pandas)
-        msg_series = df['detail'].astype(str).str.lower() if 'detail' in df.columns else pd.Series('', index=df.index)
-        
-        # Ransomware Vectorized
-        for ext in RANSOMWARE_EXT:
-            df.loc[msg_series.str.contains(ext, na=False), 'AttackCategory'] = 'Ransomware — Encryption'
-        df.loc[msg_series.str.contains('vssadmin', na=False) & msg_series.str.contains('delete', na=False), 'AttackCategory'] = 'Ransomware — Anti-Recovery'
-        
-        # Malware Vectorized
-        for p in MALWARE_PROCESSES:
-            df.loc[msg_series.str.contains(p, na=False), 'AttackCategory'] = 'Malware — Mimikatz' if p == 'mimikatz' else 'Suspicious Process Exec'
-            
-        df.loc[eid_series == 1102, 'AttackCategory'] = 'Log Tampering'
-        df.loc[eid_series == 4625, 'AttackCategory'] = 'Brute Force'
-        df.loc[(eid_series == 4624) & (user_series.isin(ADMIN_ACCOUNTS)), 'AttackCategory'] = 'Privilege Escalation'
-        df.loc[(user_series.isin(GUEST_ACCOUNTS)) & (eid_series.isin([4624, 3, 1])), 'AttackCategory'] = 'Guest Account Activity'
-        df.loc[(eid_series == 1) & (task_cat_series.str.contains('process create', na=False)) & (~user_series.str.contains('NT AUTHORITY', na=False)), 'AttackCategory'] = 'Suspicious Process Exec'
-        df.loc[eid_series == 22, 'AttackCategory'] = 'Suspicious DNS Query'
-        df.loc[eid_series == 1014, 'AttackCategory'] = 'DNS Reconnaissance'
-        df.loc[(eid_series == 3) & (user_series.isin(ADMIN_ACCOUNTS | GUEST_ACCOUNTS)), 'AttackCategory'] = 'Network Recon'
-        df.loc[eid_series == 7045, 'AttackCategory'] = 'Service Installation'
-        df.loc[eid_series == 7000, 'AttackCategory'] = 'Service Failure'
-        df.loc[eid_series == 18, 'AttackCategory'] = 'Bluetooth Exfiltration'
-        df.loc[eid_series == 24635, 'AttackCategory'] = 'Insider Theft'
-
-        # Brute Force success override
-        # Use vectorized set-lookup for high-speed correlation
-        if bf_fail_keys or bf_success_keys:
-            df_comp = df['computer'].values
-            df_logged = df['logged'].values
-            
-            # Vectorized creation of membership mask
-            is_bf_fail = pd.Series([
-                (df_comp[i], df_logged[i]) in bf_fail_keys for i in range(len(df))
-            ], index=df.index)
-            
-            is_bf_succ = pd.Series([
-                (df_comp[i], df_logged[i]) in bf_success_keys for i in range(len(df))
-            ], index=df.index)
-
-            df.loc[(eid_series == 4625) & is_bf_fail, 'AttackCategory'] = 'Brute Force — Succeeded'
-            df.loc[(eid_series == 4624) & is_bf_succ, 'AttackCategory'] = 'Brute Force — Succeeded'
-
+        # Lateral Movement overlay (from temporal correlation)
         df.loc[df.index.isin(lateral_indices), 'AttackCategory'] = 'Lateral Movement'
 
         df['MitreID']    = df['AttackCategory'].map(lambda x: THREAT_METADATA.get(x, {}).get('MitreID',   '?'))
@@ -426,24 +380,17 @@ def run_forensic_analysis():
                 print(f"  ⚡ Massive dataset detected. Sampling 50,000 rows for ML speed...")
                 ml_df = df.sample(50000, random_state=42).sort_values('logged')
 
-            # 🧠 Behavioral Enrichment: Include high-risk terms in the EventToken
-            # This allows the ML to differentiate between "Process Create (Normal)" and "Process Create (Mimikatz)"
-            risk_tokens = []
-            msg_series_ml = ml_df['detail'].astype(str).str.lower() if 'detail' in ml_df.columns else pd.Series('', index=ml_df.index)
-            
-            for i, row in ml_df.iterrows():
-                m = msg_series_ml.loc[i]
-                found_risk = "none"
-                if any(ext in m for ext in RANSOMWARE_EXT): found_risk = "ransom"
-                elif any(p in m for p in MALWARE_PROCESSES): found_risk = "malware"
-                elif any(ind in m for ind in PHISHING_INDICATORS): found_risk = "phish"
-                risk_tokens.append(found_risk)
-            
-            ml_df['RiskToken'] = risk_tokens
+            # 🧠 Behavioral Enrichment (Pure Features): Include system-level telemetry
+            # We skip 'RiskToken' to let the ML find anomalies the rules might miss.
+            def _tok_part(s):
+                return s.astype(str).str.replace(' ', '_', regex=False)
+
             ml_df['EventToken'] = (
                 ml_df['event ID'].astype(str) + '_' +
-                ml_df['User'].str.split('\\').str[-1].fillna('?') + '_' +
-                ml_df['RiskToken']
+                _tok_part(ml_df['task Category']) + '_' +
+                _tok_part(ml_df['OpcodeDisplay']) + '_' +
+                _tok_part(ml_df['LogName']) + '_' +
+                _tok_part(ml_df['AccountDomain'])
             )
             grouped     = ml_df.groupby(['computer', 'TimeBucket'])
             X_seq       = [g['EventToken'].tolist() for _, g in grouped]
@@ -454,7 +401,7 @@ def run_forensic_analysis():
                     with contextlib.redirect_stdout(io.StringIO()):
                         fe    = preprocessing.FeatureExtractor()
                         x_mat = fe.fit_transform(np.array(X_seq, dtype=object),
-                                                 term_weighting='tf-idf', normalization='zero-mean')
+                                                 term_weighting='binary', normalization='zero-mean')
                         if x_mat.shape[0] > 0:
                             # ⚡ Optimization: adjust contamination to 0.1 for better behavioral detection
                             model  = IsolationForest(contamination=0.1, random_state=42)
@@ -656,6 +603,7 @@ def run_forensic_analysis():
             '_terminal_summary': terminal_summary,
             '_meta': {
                 'generated_at':       datetime.now().isoformat(),
+                'log_platform':       'windows',
                 'total_logs':         len(df),
                 'total_threats':      total_suspicious,
                 'risk_score':         total_risk_score,

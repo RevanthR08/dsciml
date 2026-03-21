@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 _S3_ENDPOINT   = os.getenv("Bucket_Key", "").rstrip("/")
 _ACCESS_KEY_ID = os.getenv("Bucket_Access_Key", "")
@@ -113,3 +113,29 @@ def get_public_url(object_name: str) -> str | None:
         f"https://{_PROJECT_REF}.supabase.co"
         f"/storage/v1/object/public/{BUCKET_NAME}/{object_name}"
     )
+
+def empty_bucket() -> bool:
+    """Deletes all objects in the bucket, handling pagination."""
+    if not _is_configured():
+        return False
+    try:
+        s3 = _s3()
+        response = s3.list_objects_v2(Bucket=BUCKET_NAME)
+        if 'Contents' in response:
+            for obj in response['Contents']:
+                s3.delete_object(Bucket=BUCKET_NAME, Key=obj['Key'])
+            
+            while response.get('IsTruncated'):
+                response = s3.list_objects_v2(
+                    Bucket=BUCKET_NAME, 
+                    ContinuationToken=response.get('NextContinuationToken')
+                )
+                if 'Contents' in response:
+                    for obj in response['Contents']:
+                        s3.delete_object(Bucket=BUCKET_NAME, Key=obj['Key'])
+            logger.info("Successfully emptied bucket %s", BUCKET_NAME)
+        return True
+    except Exception as e:
+        logger.warning("Supabase Storage empty_bucket failed: %s", e)
+        return False
+

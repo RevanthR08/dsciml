@@ -1,0 +1,3 @@
+Error: 401 Client Error: Unauthorized for url: https://router.huggingface.co/novita/v3/openai/chat/completions (Request ID: Root=1-69bd1dbb-2a5412be64a157952f5ad0b2;129ae342-92bf-467c-a5af-2397062bf0a4)
+
+User Access Token "Read" is expired

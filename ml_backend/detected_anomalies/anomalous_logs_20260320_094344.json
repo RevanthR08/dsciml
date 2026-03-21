@@ -1,0 +1,51 @@
+{
+    "_terminal_summary": "\n==================================================================================\n  \ud83d\udcf1  ANDROID FORENSICS SYSTEM  v1.0  \u2014  POSTURE & METRICS EDITION\n==================================================================================\n  \ud83d\udcc1 File : android_test.csv\n  \ud83d\udcca Logs : 3\n==================================================================================\n  \ud83d\udd20 Running Android deterministic posture classification...\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  \ud83d\udea8 RULE-BASED DETECTION  (Android Posture Rules)\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  Attack Category                Tactic                   MITRE    Risk     Count\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  Root Compromise                Privilege Escalation     T1068      10         1\n  Mock Location Active           Defense Evasion          T1562       7         1\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n  \ud83d\udd34 Total Threats         : 2\n  \ud83d\udfe2 Normal Activity       : 1\n  \ud83d\udd25 Cumulative Risk Score : 17\n\n==================================================================================\n  \ud83e\udd16 ML VALIDATION  (Isolation Forest \u2014 numeric metrics)\n==================================================================================\n  \u26a0\ufe0f Skipping ML Validation: Insufficient numeric data.\n\n==================================================================================\n  \u23f1\ufe0f  ATTACK TIMELINE  (highest-risk events)\n==================================================================================\n  [2026-03-20 09:41:44]  Root Compromise               \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2588 R10  \ud83d\udda5 Android Device    \ud83d\udc64 MobileUser\n  [2026-03-20 09:42:44]  Mock Location Active          \u2588\u2588\u2588\u2588\u2588\u2588\u2588\u2591\u2591\u2591 R7   \ud83d\udda5 Android Device    \ud83d\udc64 MobileUser\n",
+    "_meta": {
+        "generated_at": "2026-03-20T09:43:44.485375",
+        "total_logs": 3,
+        "total_threats": 2,
+        "risk_score": 17,
+        "threat_density": 5666.67,
+        "normalized_density": 2833.34,
+        "active_rules": 2,
+        "rule_ml_agreement": "0%"
+    },
+    "_attack_chains": [],
+    "_impossible_travel": [],
+    "Mock Location Active": {
+        "mitre_id": "T1562",
+        "tactic": "Defense Evasion",
+        "risk_score": 7,
+        "count": 1,
+        "events": [
+            {
+                "logged": "2026-03-20 09:42:44.465453",
+                "event ID": 80,
+                "User": "MobileUser",
+                "computer": "Android Device",
+                "task Category": "Mobile Posture Check",
+                "MitreID": "T1562",
+                "Tactic": "Defense Evasion",
+                "RiskScore": 7
+            }
+        ]
+    },
+    "Root Compromise": {
+        "mitre_id": "T1068",
+        "tactic": "Privilege Escalation",
+        "risk_score": 10,
+        "count": 1,
+        "events": [
+            {
+                "logged": "2026-03-20 09:41:44.465453",
+                "event ID": 30,
+                "User": "MobileUser",
+                "computer": "Android Device",
+                "task Category": "Mobile Posture Check",
+                "MitreID": "T1068",
+                "Tactic": "Privilege Escalation",
+                "RiskScore": 10
+            }
+        ]
+    }
+}
