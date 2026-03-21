@@ -1,8 +1,5 @@
-import shutil
-import subprocess
 import os
 import uuid as _uuid
-import glob
 
 from fastapi import (
     FastAPI, BackgroundTasks, UploadFile, File,
@@ -18,10 +15,9 @@ from db_models import (
 )
 from db_persist import persist_scan_report
 from ai_intelligence import SecurityAI
-from evtx_parser import parse_evtx_to_csv
+from forensic_report import run_forensic_analysis
 from storage_supabase import (
-    upload_to_bucket, get_public_url, download_from_bucket,
-    BUCKET_NAME, _is_configured as _storage_ok
+    download_from_bucket_bytes, BUCKET_NAME
 )
 
 app = FastAPI(title="LogSentinal SOC Microservice", version="2.0")
@@ -36,9 +32,9 @@ app.add_middleware(
 
 ai_engine = SecurityAI()
 
-UPLOAD_DIR = "temp_uploads"
 REPORTS_DIR = "detected_anomalies"
 ALLOWED_EXTENSIONS = {".csv", ".evtx"}
+
 
 
 # ━━━ Helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -62,9 +58,56 @@ def _resolve_scan(scan_id: str, db: Session) -> Scan:
     return scan
 
 
-def _latest_report_path() -> str | None:
-    files = glob.glob(os.path.join(REPORTS_DIR, "anomalous_logs_*.json"))
-    return max(files, key=os.path.getctime) if files else None
+def _run_forensic_pipeline(file_bytes: bytes, filename: str, user_id: str = None) -> dict:
+    """
+    Execute forensic analysis pipeline (fully in-memory, zero disk storage).
+    Returns analysis results dict or error info.
+    
+    Args:
+        file_bytes: Raw file content as bytes (no disk writes)
+        filename: Original filename (for logging only)
+        user_id: User UUID owning this scan
+    """
+    # Call forensic analysis directly with in-memory bytes
+    try:
+        analysis_dict = run_forensic_analysis(file_bytes=file_bytes, filename=filename, return_dict=True)
+    except Exception as e:
+        return {"error": f"Forensic analysis failed: {e}"}
+    
+    if not analysis_dict:
+        return {"error": "No analysis data returned"}
+
+    # Persist to database directly (no intermediate files)
+    db = SessionLocal()
+    try:
+        scan = persist_scan_report(
+            db,
+            source_file_name=filename,
+            user_id=user_id,
+            data_dict=analysis_dict,
+        )
+        briefing = ai_engine.process_full_report_for_scan(
+            scan_id=scan.scan_id,
+            user_id=str(scan.user_id),
+        )
+        scan.ai_briefing = briefing
+        db.commit()
+        db.refresh(scan)
+        
+        print(f"✅ Analysis complete (in-memory processing): {filename}")
+        
+        return {
+            "scan_id": str(scan.scan_id),
+            "status": "completed",
+            "total_logs": scan.total_logs,
+            "total_threats": scan.total_threats,
+            "risk_score": scan.risk_score,
+        }
+    except Exception as e:
+        db.rollback()
+        return {"error": str(e)}
+    finally:
+        db.close()
 
 
 # ━━━ Health ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -85,24 +128,37 @@ def health(db: Session = Depends(get_db)):
     }
 
 
+
 # ━━━ Upload (CSV + EVTX) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _upload_to_supabase(local_path: str, object_name: str, content_type: str = "text/csv") -> dict:
-    """Upload file to Supabase Storage. Returns dict with bucket_path and public_url."""
-    bucket_path = upload_to_bucket(local_path, object_name, content_type=content_type)
-    return {
-        "bucket_path": bucket_path,
-        "public_url": get_public_url(object_name) if bucket_path else None,
-    }
-
-
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...), user_id: str = None):
     """
-    Upload a log file for analysis.
+    Upload a log file and automatically run forensic analysis.
     Accepts both .csv and .evtx (Windows Event Log) formats.
-    Files are saved locally for the pipeline and also uploaded to your Supabase Storage bucket.
+    Processing is fully in-memory (zero local storage). Results stored in database only.
+    
+    Query Parameters:
+      - user_id (required): UUID of the user who owns this scan
+    
+    Note: All results are stored in the PostgreSQL database, not locally.
     """
+    # Validate userId is provided
+    if not user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="user_id is required as query parameter (UUID string)"
+        )
+    
+    # Validate it's a valid UUID
+    try:
+        _uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid user_id format: {user_id}. Must be a valid UUID."
+        )
+    
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -110,148 +166,129 @@ async def upload_file(file: UploadFile = File(...)):
             detail=f"Unsupported file type '{ext}'. Accepted: .csv, .evtx",
         )
 
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    raw_path = os.path.join(UPLOAD_DIR, file.filename)
-
-    with open(raw_path, "wb") as buf:
-        shutil.copyfileobj(file.file, buf)
-
-    bucket_path = None
-    if ext == ".evtx":
-        csv_filename = file.filename.rsplit(".", 1)[0] + ".csv"
-        csv_path = os.path.join(UPLOAD_DIR, csv_filename)
-        try:
-            row_count = parse_evtx_to_csv(raw_path, csv_path)
-        except Exception as e:
-            os.remove(raw_path)
-            raise HTTPException(status_code=500, detail=f"EVTX parsing failed: {e}")
-        os.remove(raw_path)
-
-        final_path = os.path.abspath(csv_path)
-        object_name = f"logs/{csv_filename}"
-        storage = _upload_to_supabase(final_path, object_name)
-        os.environ["SOC_LOG_FILE"] = final_path
-        return {
-            "message": f"EVTX converted successfully ({row_count:,} records)",
-            "original_file": file.filename,
-            "converted_to": csv_filename,
-            "file_path": final_path,
-            "file_type": "evtx",
-            "bucket": BUCKET_NAME,
-            **storage,
-            "next_step": "Call POST /scans to analyze.",
-        }
-
-    final_path = os.path.abspath(raw_path)
-    object_name = f"logs/{file.filename}"
-    storage = _upload_to_supabase(final_path, object_name)
-    os.environ["SOC_LOG_FILE"] = final_path
+    # ✅ Read file into memory (no disk writes)
+    file_bytes = await file.read()
+    
+    # 🚀 Trigger analysis with in-memory bytes (no temp files)
+    pipeline_result = _run_forensic_pipeline(
+        file_bytes=file_bytes,
+        filename=file.filename,
+        user_id=user_id
+    )
+    
     return {
-        "message": f"Uploaded {file.filename}",
-        "file_path": final_path,
-        "file_type": "csv",
-        "bucket": BUCKET_NAME,
-        **storage,
-        "next_step": "Call POST /scans to analyze.",
+        "message": f"Uploaded {file.filename} and analysis completed",
+        "file_type": ext[1:].upper(),  # "CSV" or "EVTX"
+        "processing": "in-memory (no local storage)",
+        "analysis": pipeline_result,
     }
 
 
 # ━━━ Scans ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-@app.get("/files")
-def list_files():
-    """
-    List all files available in temp_uploads/ that can be submitted to POST /scans.
-    Returns file names, sizes, and the file_path to pass to /scans.
-    """
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    files = []
-    for fname in sorted(os.listdir(UPLOAD_DIR)):
-        fpath = os.path.join(UPLOAD_DIR, fname)
-        if os.path.isfile(fpath) and os.path.splitext(fname)[1].lower() == ".csv":
-            files.append({
-                "file_name": fname,
-                "file_path": os.path.abspath(fpath),
-                "size_kb": round(os.path.getsize(fpath) / 1024, 1),
-            })
-    return {"count": len(files), "files": files}
-
-
 @app.post("/scans")
-def create_scan(background_tasks: BackgroundTasks, body: dict = None):
+def create_scan(background_tasks: BackgroundTasks, body: dict = None, db: Session = Depends(get_db)):
     """
-    Trigger a forensic scan on any uploaded file.
-
+    Trigger a forensic scan (in-memory processing, zero local storage).
+    
     Body options (S3 priority):
-      {"bucket_path": "logs/System.csv"}   ← Download and scan from S3 bucket
-      {"file_name": "System.csv"}          ← file name inside temp_uploads/
-      {"file_path": "/absolute/path.csv"}  ← absolute path on disk
+      {
+        "bucket_path": "logs/System.csv",      ← Download and scan from S3 bucket
+        "user_id": "uuid-string",               ← Required: UUID of the user who owns this scan
+        "background": false                     ← Optional: Run in background (default: false)
+      }
+      OR
+      {
+        "file_content": "<base64-encoded-bytes>",  ← File bytes (base64)
+        "filename": "logs.csv",                     ← Filename (to detect format)
+        "user_id": "uuid-string",                   ← Required: UUID of the user who owns this scan
+        "background": false                         ← Optional: Run in background (default: false)
+      }
     """
     body = body or {}
 
-    # Resolve target file
-    file_path = None
+    # Validate userId is provided
+    user_id = body.get("user_id")
+    if not user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="user_id is required in request body (UUID string)"
+        )
+
+    # Validate it's a valid UUID
+    try:
+        _uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid user_id format: {user_id}. Must be a valid UUID."
+        )
+
+    # Resolve file content (in-memory)
+    file_bytes = None
+    filename = None
     
     if body.get("bucket_path"):
+        # Download from S3 into memory (zero disk I/O)
         object_name = body["bucket_path"]
-        local_filename = os.path.basename(object_name)
-        os.makedirs(UPLOAD_DIR, exist_ok=True)
-        file_path = os.path.abspath(os.path.join(UPLOAD_DIR, local_filename))
+        filename = os.path.basename(object_name)
         
-        success = download_from_bucket(object_name, file_path)
-        if not success:
+        file_bytes = download_from_bucket_bytes(object_name)
+        if file_bytes is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"Could not download '{object_name}' from S3 bucket '{BUCKET_NAME}'."
             )
-    elif body.get("file_name"):
-        file_path = os.path.abspath(
-            os.path.join(UPLOAD_DIR, body["file_name"])
-        )
-    elif body.get("file_path"):
-        file_path = body["file_path"]
+    elif body.get("file_content") and body.get("filename"):
+        # Accept pre-encoded file bytes
+        import base64
+        try:
+            file_bytes = base64.b64decode(body["file_content"])
+            filename = body["filename"]
+        except Exception as e:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid base64-encoded file content: {e}"
+            )
     else:
-        file_path = os.getenv("SOC_LOG_FILE")
-
-    if not file_path or not os.path.exists(file_path):
-        available = [f for f in os.listdir(UPLOAD_DIR) if f.endswith(".csv")] \
-            if os.path.exists(UPLOAD_DIR) else []
         raise HTTPException(
             status_code=400,
-            detail={
-                "error": "No valid log file found.",
-                "hint": "Upload one via POST /upload, then pass its file_name or file_path here.",
-                "available_files": available,
-            },
+            detail="Either 'bucket_path' or ('file_content' + 'filename') is required in request body."
         )
 
-    def run_pipeline(path: str):
-        env = os.environ.copy()
-        env["SOC_LOG_FILE"] = path
-        subprocess.run(["python", "forensic_report.py", path], env=env)
+    if not file_bytes or not filename:
+        raise HTTPException(
+            status_code=400,
+            detail="No valid file data found."
+        )
 
-        report_path = _latest_report_path()
-        if not report_path:
-            return
-
-        db = SessionLocal()
-        try:
-            scan = persist_scan_report(
-                db, report_path, source_file_name=os.path.basename(path)
-            )
-            briefing = ai_engine.process_full_report()
-            scan.ai_briefing = briefing
-            db.commit()
-        finally:
-            db.close()
-
-    background_tasks.add_task(run_pipeline, file_path)
-    return {
-        "status": "started",
-        "analyzing": os.path.basename(file_path),
-        "file_path": file_path,
-        "message": "Pipeline running in background. Poll GET /scans/latest for results.",
-    }
+    # Execute pipeline (can be sync or added to background)
+    if body.get("background"):
+        background_tasks.add_task(
+            _run_forensic_pipeline,
+            file_bytes=file_bytes,
+            filename=filename,
+            user_id=user_id
+        )
+        return {
+            "status": "started",
+            "analyzing": filename,
+            "user_id": user_id,
+            "message": "Pipeline running in background. Poll GET /scans/{scan_id} to check status.",
+        }
+    else:
+        # Run synchronously and return results immediately
+        result = _run_forensic_pipeline(
+            file_bytes=file_bytes,
+            filename=filename,
+            user_id=user_id
+        )
+        return {
+            "status": "completed",
+            "analyzing": filename,
+            "user_id": user_id,
+            **result,
+        }
 
 
 @app.get("/scans")
@@ -414,16 +451,45 @@ def get_scan_summary(scan_id: str, db: Session = Depends(get_db)):
 
 
 @app.post("/ask")
-def ask_question(query: dict):
+def ask_question(body: dict = None, db: Session = Depends(get_db)):
     """
-    Ask a security question about detected anomalies.
-    Expects: {"question": "..."}
+    Ask a security question about detected anomalies for a specific scan.
+    All data comes from the database - no local file access.
+    
+    Body:
+      {
+        "scan_id": "uuid-string",   ← Required: UUID of scan to analyze
+        "question": "Your question..."  ← Required: Security question
+      }
     """
-    question = query.get("question")
+    body = body or {}
+    
+    question = body.get("question")
+    scan_id = body.get("scan_id")
+    
+    if not scan_id:
+        raise HTTPException(status_code=400, detail="scan_id is required in request body.")
+    
     if not question:
-        raise HTTPException(status_code=400, detail="No question provided.")
-    answer = ai_engine.answer_question(question)
-    return {"answer": answer}
+        raise HTTPException(status_code=400, detail="question is required in request body.")
+    
+    # Validate scan exists in database
+    try:
+        sid = _uuid.UUID(scan_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid scan_id format: {scan_id}")
+    
+    scan = db.query(Scan).filter(Scan.scan_id == sid).first()
+    if not scan:
+        raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found in database.")
+    
+    # Answer is based on DB data, not local files
+    answer = ai_engine.answer_question(question, scan_id=scan_id)
+    return {
+        "scan_id": str(scan.scan_id),
+        "question": question,
+        "answer": answer,
+    }
 
 
 # ━━━ Dashboard ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -453,4 +519,5 @@ def dashboard_stats(db: Session = Depends(get_db)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Pass app as import string for reload to work properly
+    uvicorn.run("main_api:app", host="0.0.0.0", port=8000, reload=True)

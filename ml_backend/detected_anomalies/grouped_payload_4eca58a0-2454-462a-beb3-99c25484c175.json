@@ -1,0 +1,128 @@
+{
+  "Brute Force \u2014 Succeeded": {
+    "category_id": "6aba9328-c9ea-4708-874b-926573506a9e",
+    "category_name": "Brute Force \u2014 Succeeded",
+    "tactic": "Credential Access",
+    "mitre_id": "T1110",
+    "risk_score": 9,
+    "event_count": 80,
+    "groups": [
+      {
+        "user_account": "admin",
+        "computer": "RohithLap",
+        "task_category": "Security",
+        "count": 80,
+        "start_time": "2026-03-21T14:21:16+00:00",
+        "end_time": "2026-03-21T22:41:16+00:00"
+      }
+    ]
+  },
+  "Lateral Movement": {
+    "category_id": "d628b29d-ef55-4f6d-a5ee-3a95c6e70c57",
+    "category_name": "Lateral Movement",
+    "tactic": "Lateral Movement",
+    "mitre_id": "T1021",
+    "risk_score": 8,
+    "event_count": 1,
+    "groups": [
+      {
+        "user_account": "admin",
+        "computer": "Workstation-B",
+        "task_category": "Security",
+        "count": 1,
+        "start_time": "2026-03-21T08:47:56+00:00",
+        "end_time": "2026-03-21T08:47:56+00:00"
+      }
+    ]
+  },
+  "Log Tampering": {
+    "category_id": "7e79c9f1-1d70-4dc5-a204-8717a449d2f8",
+    "category_name": "Log Tampering",
+    "tactic": "Defense Evasion",
+    "mitre_id": "T1070",
+    "risk_score": 10,
+    "event_count": 1,
+    "groups": [
+      {
+        "user_account": "admin",
+        "computer": "RohithLap",
+        "task_category": "Security",
+        "count": 1,
+        "start_time": "2026-03-21T03:14:36+00:00",
+        "end_time": "2026-03-21T03:14:36+00:00"
+      }
+    ]
+  },
+  "Malware \u2014 Mimikatz": {
+    "category_id": "cc3fe664-70e5-492f-8a32-372e7ab3f8c6",
+    "category_name": "Malware \u2014 Mimikatz",
+    "tactic": "Credential Access",
+    "mitre_id": "T1003",
+    "risk_score": 10,
+    "event_count": 4,
+    "groups": [
+      {
+        "user_account": "admin",
+        "computer": "RohithLap",
+        "task_category": "Security",
+        "count": 4,
+        "start_time": "2026-03-21T14:21:16+00:00",
+        "end_time": "2026-03-21T22:41:16+00:00"
+      }
+    ]
+  },
+  "Ransomware \u2014 Anti-Recovery": {
+    "category_id": "92b9bc7a-c5fd-4d57-b465-9c1973389ef7",
+    "category_name": "Ransomware \u2014 Anti-Recovery",
+    "tactic": "Impact",
+    "mitre_id": "T1490",
+    "risk_score": 10,
+    "event_count": 1,
+    "groups": [
+      {
+        "user_account": "admin",
+        "computer": "RohithLap",
+        "task_category": "Security",
+        "count": 1,
+        "start_time": "2026-03-21T00:27:56+00:00",
+        "end_time": "2026-03-21T00:27:56+00:00"
+      }
+    ]
+  },
+  "Ransomware \u2014 Encryption": {
+    "category_id": "6337a6fe-d586-4422-a6cc-4ee8a7628d08",
+    "category_name": "Ransomware \u2014 Encryption",
+    "tactic": "Impact",
+    "mitre_id": "T1486",
+    "risk_score": 10,
+    "event_count": 1,
+    "groups": [
+      {
+        "user_account": "admin",
+        "computer": "RohithLap",
+        "task_category": "Security",
+        "count": 1,
+        "start_time": "2026-03-21T00:27:56+00:00",
+        "end_time": "2026-03-21T00:27:56+00:00"
+      }
+    ]
+  },
+  "Service Installation": {
+    "category_id": "79abf6d0-d872-4d03-ad67-9dc4b39b7004",
+    "category_name": "Service Installation",
+    "tactic": "Persistence",
+    "mitre_id": "T1543",
+    "risk_score": 8,
+    "event_count": 1,
+    "groups": [
+      {
+        "user_account": "SYSTEM",
+        "computer": "RohithLap",
+        "task_category": "Security",
+        "count": 1,
+        "start_time": "2026-03-21T11:34:36+00:00",
+        "end_time": "2026-03-21T11:34:36+00:00"
+      }
+    ]
+  }
+}

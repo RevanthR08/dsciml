@@ -23,4 +23,5 @@ evtx2df
 # AI & LLM Integration
 google-generativeai
 huggingface-hub
+openai
 python-dotenv

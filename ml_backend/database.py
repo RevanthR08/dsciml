@@ -4,7 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # Supabase Postgres (primary): SUPABASE_URL or DATABASE_URL
 DATABASE_URL = os.getenv("SUPABASE_URL") or os.getenv("DATABASE_URL")

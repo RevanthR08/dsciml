@@ -105,6 +105,23 @@ def download_from_bucket(
         return False
 
 
+def download_from_bucket_bytes(object_name: str) -> bytes | None:
+    """
+    Download a file from the Supabase Storage bucket (S3) as bytes (in-memory, zero disk I/O).
+    Returns bytes on success, None on failure.
+    """
+    if not _is_configured():
+        return None
+    try:
+        response = _s3().get_object(Bucket=BUCKET_NAME, Key=object_name)
+        file_bytes = response['Body'].read()
+        logger.info("Downloaded %s/%s (in-memory: %d bytes)", BUCKET_NAME, object_name, len(file_bytes))
+        return file_bytes
+    except Exception as e:
+        logger.warning("Supabase Storage in-memory download failed: %s", e)
+        return None
+
+
 def get_public_url(object_name: str) -> str | None:
     """Public URL for an object in a public bucket."""
     if not _PROJECT_REF:

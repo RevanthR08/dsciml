@@ -32,18 +32,32 @@ def _safe_int(val, default=None) -> int | None:
 
 def persist_scan_report(
     db: Session,
-    json_path: str,
+    json_path: str | None = None,
     source_file_name: str | None = None,
+    user_id: str | None = None,
+    data_dict: dict | None = None,
 ) -> Scan:
     """
-    Parse the forensic report JSON at *json_path* and INSERT everything
-    into the scans / anomaly_categories / anomalous_events /
-    attack_chains / impossible_travels tables.
-
-    Returns the created Scan ORM object (with scan_id populated).
+    Persist forensic analysis results to database.
+    
+    Args:
+        db: SQLAlchemy session
+        json_path: Path to JSON file (deprecated; for backward compat only)
+        source_file_name: Original uploaded filename
+        user_id: UUID of user who owns this scan
+        data_dict: Analysis dict from forensic_report.run_forensic_analysis() (preferred)
+    
+    Returns:
+        Created Scan ORM object with scan_id populated
     """
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    # Accept either dict or file path (backward compat)
+    if data_dict is not None:
+        data = data_dict
+    elif json_path:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    else:
+        raise ValueError("Either json_path or data_dict must be provided")
 
     meta = data.get("_meta", {})
 
@@ -54,6 +68,7 @@ def persist_scan_report(
             if meta.get("generated_at")
             else datetime.utcnow()
         ),
+        user_id=user_id,
         file_name=source_file_name or os.path.basename(json_path),
         total_logs=meta.get("total_logs", 0),
         total_threats=meta.get("total_threats", 0),

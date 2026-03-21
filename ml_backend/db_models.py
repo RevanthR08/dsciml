@@ -1,17 +1,40 @@
 import uuid
 from sqlalchemy import (
     Column, String, Integer, Text, Numeric,
-    ForeignKey, UniqueConstraint,
+    ForeignKey, UniqueConstraint, Index,
 )
 from sqlalchemy.dialects.postgresql import UUID, TIMESTAMP
 from sqlalchemy.orm import relationship
 from database import Base
 
 
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("email"),)
+
+    user_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), nullable=False, unique=True)
+    password = Column(String(255), nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True))
+
+    scans = relationship("Scan", back_populates="user", cascade="all, delete-orphan")
+
+    def to_dict(self):
+        return {
+            "user_id": str(self.user_id),
+            "email": self.email,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class Scan(Base):
     __tablename__ = "scans"
+    __table_args__ = (
+        Index('idx_scan_user_file', 'user_id', 'file_name'),
+    )
 
     scan_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="CASCADE"), default=uuid.UUID("356721c8-1559-4c00-9aec-8be06d861028"))
     generated_at = Column(TIMESTAMP(timezone=True))
     file_name = Column(String(255))
     total_logs = Column(Integer, nullable=False)
@@ -24,6 +47,7 @@ class Scan(Base):
     terminal_summary = Column(Text)
     ai_briefing = Column(Text)
 
+    user = relationship("User", back_populates="scans")
     categories = relationship("AnomalyCategory", back_populates="scan", cascade="all, delete-orphan")
     events = relationship("AnomalousEvent", back_populates="scan", cascade="all, delete-orphan")
     chains = relationship("AttackChain", back_populates="scan", cascade="all, delete-orphan")
@@ -46,7 +70,10 @@ class Scan(Base):
 
 class AnomalyCategory(Base):
     __tablename__ = "anomaly_categories"
-    __table_args__ = (UniqueConstraint("scan_id", "category_name"),)
+    __table_args__ = (
+        UniqueConstraint("scan_id", "category_name"),
+        Index('idx_category_scan', 'scan_id'),
+    )
 
     category_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.scan_id", ondelete="CASCADE"))
@@ -55,6 +82,7 @@ class AnomalyCategory(Base):
     tactic = Column(String(100))
     risk_score = Column(Integer, nullable=False)
     event_count = Column(Integer, nullable=False)
+    ai_summary = Column(Text)
 
     scan = relationship("Scan", back_populates="categories")
     events = relationship("AnomalousEvent", back_populates="category", cascade="all, delete-orphan")
@@ -67,11 +95,15 @@ class AnomalyCategory(Base):
             "tactic": self.tactic,
             "risk_score": self.risk_score,
             "event_count": self.event_count,
+            "ai_summary": self.ai_summary,
         }
 
 
 class AnomalousEvent(Base):
     __tablename__ = "anomalous_events"
+    __table_args__ = (
+        Index('idx_event_scan', 'scan_id'),
+    )
 
     event_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.scan_id", ondelete="CASCADE"))
@@ -99,6 +131,9 @@ class AnomalousEvent(Base):
 
 class ImpossibleTravel(Base):
     __tablename__ = "impossible_travels"
+    __table_args__ = (
+        Index('idx_travel_scan', 'scan_id'),
+    )
 
     travel_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.scan_id", ondelete="CASCADE"))
@@ -125,6 +160,9 @@ class ImpossibleTravel(Base):
 
 class AttackChain(Base):
     __tablename__ = "attack_chains"
+    __table_args__ = (
+        Index('idx_chain_scan', 'scan_id'),
+    )
 
     chain_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.scan_id", ondelete="CASCADE"))

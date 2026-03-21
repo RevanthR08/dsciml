@@ -68,3 +68,5 @@ __pycache__/
 ml_backend/data/HDFS/mockv.csv
 *.csv
 .DS_Store
+.detected_anomalies
+./detected_anomalies
