@@ -2,8 +2,15 @@ import os
 import uuid as _uuid
 
 from fastapi import (
-    FastAPI, BackgroundTasks, UploadFile, File,
-    Query, HTTPException, Depends,
+    FastAPI,
+    BackgroundTasks,
+    UploadFile,
+    File,
+    Query,
+    HTTPException,
+    Depends,
+    WebSocket,
+    WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -11,14 +18,17 @@ from sqlalchemy import func, desc, text
 
 from database import SessionLocal, get_db
 from db_models import (
-    Scan, AnomalyCategory, AnomalousEvent, AttackChain, ImpossibleTravel,
+    Scan,
+    AnomalyCategory,
+    AnomalousEvent,
+    AttackChain,
+    ImpossibleTravel,
 )
 from db_persist import persist_scan_report
 from ai_intelligence import SecurityAI
 from forensic_report import run_forensic_analysis
-from storage_supabase import (
-    download_from_bucket_bytes, BUCKET_NAME
-)
+from storage_supabase import download_from_bucket_bytes, BUCKET_NAME
+from system_monitor import get_system_stats, stream_system_stats
 
 app = FastAPI(title="LogSentinal SOC Microservice", version="2.0")
 
@@ -36,8 +46,8 @@ REPORTS_DIR = "detected_anomalies"
 ALLOWED_EXTENSIONS = {".csv", ".evtx"}
 
 
-
 # ━━━ Helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 def _resolve_scan(scan_id: str, db: Session) -> Scan:
     """
@@ -58,11 +68,13 @@ def _resolve_scan(scan_id: str, db: Session) -> Scan:
     return scan
 
 
-def _run_forensic_pipeline(file_bytes: bytes, filename: str, user_id: str = None) -> dict:
+def _run_forensic_pipeline(
+    file_bytes: bytes, filename: str, user_id: str = None
+) -> dict:
     """
     Execute forensic analysis pipeline (fully in-memory, zero disk storage).
     Returns analysis results dict or error info.
-    
+
     Args:
         file_bytes: Raw file content as bytes (no disk writes)
         filename: Original filename (for logging only)
@@ -70,10 +82,12 @@ def _run_forensic_pipeline(file_bytes: bytes, filename: str, user_id: str = None
     """
     # Call forensic analysis directly with in-memory bytes
     try:
-        analysis_dict = run_forensic_analysis(file_bytes=file_bytes, filename=filename, return_dict=True)
+        analysis_dict = run_forensic_analysis(
+            file_bytes=file_bytes, filename=filename, return_dict=True
+        )
     except Exception as e:
         return {"error": f"Forensic analysis failed: {e}"}
-    
+
     if not analysis_dict:
         return {"error": "No analysis data returned"}
 
@@ -93,9 +107,9 @@ def _run_forensic_pipeline(file_bytes: bytes, filename: str, user_id: str = None
         scan.ai_briefing = briefing
         db.commit()
         db.refresh(scan)
-        
+
         print(f"✅ Analysis complete (in-memory processing): {filename}")
-        
+
         return {
             "scan_id": str(scan.scan_id),
             "status": "completed",
@@ -111,6 +125,7 @@ def _run_forensic_pipeline(file_bytes: bytes, filename: str, user_id: str = None
 
 
 # ━━━ Health ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 @app.get("/health")
 def health(db: Session = Depends(get_db)):
@@ -128,8 +143,8 @@ def health(db: Session = Depends(get_db)):
     }
 
 
-
 # ━━━ Upload (CSV + EVTX) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), user_id: str = None):
@@ -137,28 +152,28 @@ async def upload_file(file: UploadFile = File(...), user_id: str = None):
     Upload a log file and automatically run forensic analysis.
     Accepts both .csv and .evtx (Windows Event Log) formats.
     Processing is fully in-memory (zero local storage). Results stored in database only.
-    
+
     Query Parameters:
       - user_id (required): UUID of the user who owns this scan
-    
+
     Note: All results are stored in the PostgreSQL database, not locally.
     """
     # Validate userId is provided
     if not user_id:
         raise HTTPException(
             status_code=400,
-            detail="user_id is required as query parameter (UUID string)"
+            detail="user_id is required as query parameter (UUID string)",
         )
-    
+
     # Validate it's a valid UUID
     try:
         _uuid.UUID(user_id)
     except ValueError:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid user_id format: {user_id}. Must be a valid UUID."
+            detail=f"Invalid user_id format: {user_id}. Must be a valid UUID.",
         )
-    
+
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
         raise HTTPException(
@@ -168,14 +183,12 @@ async def upload_file(file: UploadFile = File(...), user_id: str = None):
 
     # ✅ Read file into memory (no disk writes)
     file_bytes = await file.read()
-    
+
     # 🚀 Trigger analysis with in-memory bytes (no temp files)
     pipeline_result = _run_forensic_pipeline(
-        file_bytes=file_bytes,
-        filename=file.filename,
-        user_id=user_id
+        file_bytes=file_bytes, filename=file.filename, user_id=user_id
     )
-    
+
     return {
         "message": f"Uploaded {file.filename} and analysis completed",
         "file_type": ext[1:].upper(),  # "CSV" or "EVTX"
@@ -186,11 +199,14 @@ async def upload_file(file: UploadFile = File(...), user_id: str = None):
 
 # ━━━ Scans ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+
 @app.post("/scans")
-def create_scan(background_tasks: BackgroundTasks, body: dict = None, db: Session = Depends(get_db)):
+def create_scan(
+    background_tasks: BackgroundTasks, body: dict = None, db: Session = Depends(get_db)
+):
     """
     Trigger a forensic scan (in-memory processing, zero local storage).
-    
+
     Body options (S3 priority):
       {
         "bucket_path": "logs/System.csv",      ← Download and scan from S3 bucket
@@ -211,8 +227,7 @@ def create_scan(background_tasks: BackgroundTasks, body: dict = None, db: Sessio
     user_id = body.get("user_id")
     if not user_id:
         raise HTTPException(
-            status_code=400,
-            detail="user_id is required in request body (UUID string)"
+            status_code=400, detail="user_id is required in request body (UUID string)"
         )
 
     # Validate it's a valid UUID
@@ -221,46 +236,43 @@ def create_scan(background_tasks: BackgroundTasks, body: dict = None, db: Sessio
     except ValueError:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid user_id format: {user_id}. Must be a valid UUID."
+            detail=f"Invalid user_id format: {user_id}. Must be a valid UUID.",
         )
 
     # Resolve file content (in-memory)
     file_bytes = None
     filename = None
-    
+
     if body.get("bucket_path"):
         # Download from S3 into memory (zero disk I/O)
         object_name = body["bucket_path"]
         filename = os.path.basename(object_name)
-        
+
         file_bytes = download_from_bucket_bytes(object_name)
         if file_bytes is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"Could not download '{object_name}' from S3 bucket '{BUCKET_NAME}'."
+                detail=f"Could not download '{object_name}' from S3 bucket '{BUCKET_NAME}'.",
             )
     elif body.get("file_content") and body.get("filename"):
         # Accept pre-encoded file bytes
         import base64
+
         try:
             file_bytes = base64.b64decode(body["file_content"])
             filename = body["filename"]
         except Exception as e:
             raise HTTPException(
-                status_code=400,
-                detail=f"Invalid base64-encoded file content: {e}"
+                status_code=400, detail=f"Invalid base64-encoded file content: {e}"
             )
     else:
         raise HTTPException(
             status_code=400,
-            detail="Either 'bucket_path' or ('file_content' + 'filename') is required in request body."
+            detail="Either 'bucket_path' or ('file_content' + 'filename') is required in request body.",
         )
 
     if not file_bytes or not filename:
-        raise HTTPException(
-            status_code=400,
-            detail="No valid file data found."
-        )
+        raise HTTPException(status_code=400, detail="No valid file data found.")
 
     # Execute pipeline (can be sync or added to background)
     if body.get("background"):
@@ -268,7 +280,7 @@ def create_scan(background_tasks: BackgroundTasks, body: dict = None, db: Sessio
             _run_forensic_pipeline,
             file_bytes=file_bytes,
             filename=filename,
-            user_id=user_id
+            user_id=user_id,
         )
         return {
             "status": "started",
@@ -279,9 +291,7 @@ def create_scan(background_tasks: BackgroundTasks, body: dict = None, db: Sessio
     else:
         # Run synchronously and return results immediately
         result = _run_forensic_pipeline(
-            file_bytes=file_bytes,
-            filename=filename,
-            user_id=user_id
+            file_bytes=file_bytes, filename=filename, user_id=user_id
         )
         return {
             "status": "completed",
@@ -328,12 +338,16 @@ def get_scan(scan_id: str, db: Session = Depends(get_db)):
         .order_by(desc(AnomalyCategory.risk_score))
         .all()
     )
-    chain_count = db.query(func.count(AttackChain.chain_id)).filter(
-        AttackChain.scan_id == scan.scan_id
-    ).scalar()
-    travel_count = db.query(func.count(ImpossibleTravel.travel_id)).filter(
-        ImpossibleTravel.scan_id == scan.scan_id
-    ).scalar()
+    chain_count = (
+        db.query(func.count(AttackChain.chain_id))
+        .filter(AttackChain.scan_id == scan.scan_id)
+        .scalar()
+    )
+    travel_count = (
+        db.query(func.count(ImpossibleTravel.travel_id))
+        .filter(ImpossibleTravel.scan_id == scan.scan_id)
+        .scalar()
+    )
 
     return {
         **scan.to_dict(),
@@ -354,6 +368,7 @@ def delete_scan(scan_id: str, db: Session = Depends(get_db)):
 
 
 # ━━━ Scan Sub-resources ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 @app.get("/scans/{scan_id}/categories")
 def get_scan_categories(scan_id: str, db: Session = Depends(get_db)):
@@ -383,7 +398,9 @@ def get_scan_events(
 
     query = (
         db.query(AnomalousEvent, AnomalyCategory.category_name)
-        .join(AnomalyCategory, AnomalousEvent.category_id == AnomalyCategory.category_id)
+        .join(
+            AnomalyCategory, AnomalousEvent.category_id == AnomalyCategory.category_id
+        )
         .filter(AnomalousEvent.scan_id == scan.scan_id)
     )
 
@@ -395,12 +412,7 @@ def get_scan_events(
         query = query.filter(AnomalousEvent.user_account == user)
 
     total = query.count()
-    rows = (
-        query.order_by(AnomalousEvent.time_logged)
-        .offset(offset)
-        .limit(limit)
-        .all()
-    )
+    rows = query.order_by(AnomalousEvent.time_logged).offset(offset).limit(limit).all()
 
     events = [evt.to_dict(category_name=cat_name) for evt, cat_name in rows]
     return {"total": total, "limit": limit, "offset": offset, "events": events}
@@ -410,11 +422,7 @@ def get_scan_events(
 def get_scan_chains(scan_id: str, db: Session = Depends(get_db)):
     """Attack chains detected in a scan."""
     scan = _resolve_scan(scan_id, db)
-    chains = (
-        db.query(AttackChain)
-        .filter(AttackChain.scan_id == scan.scan_id)
-        .all()
-    )
+    chains = db.query(AttackChain).filter(AttackChain.scan_id == scan.scan_id).all()
     return {"count": len(chains), "chains": [c.to_dict() for c in chains]}
 
 
@@ -431,6 +439,7 @@ def get_scan_travels(scan_id: str, db: Session = Depends(get_db)):
 
 
 # ━━━ AI / Intelligence ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 @app.get("/scans/{scan_id}/summary")
 def get_scan_summary(scan_id: str, db: Session = Depends(get_db)):
@@ -455,7 +464,7 @@ def ask_question(body: dict = None, db: Session = Depends(get_db)):
     """
     Ask a security question about detected anomalies for a specific scan.
     All data comes from the database - no local file access.
-    
+
     Body:
       {
         "scan_id": "uuid-string",   ← Required: UUID of scan to analyze
@@ -463,26 +472,34 @@ def ask_question(body: dict = None, db: Session = Depends(get_db)):
       }
     """
     body = body or {}
-    
+
     question = body.get("question")
     scan_id = body.get("scan_id")
-    
+
     if not scan_id:
-        raise HTTPException(status_code=400, detail="scan_id is required in request body.")
-    
+        raise HTTPException(
+            status_code=400, detail="scan_id is required in request body."
+        )
+
     if not question:
-        raise HTTPException(status_code=400, detail="question is required in request body.")
-    
+        raise HTTPException(
+            status_code=400, detail="question is required in request body."
+        )
+
     # Validate scan exists in database
     try:
         sid = _uuid.UUID(scan_id)
     except ValueError:
-        raise HTTPException(status_code=400, detail=f"Invalid scan_id format: {scan_id}")
-    
+        raise HTTPException(
+            status_code=400, detail=f"Invalid scan_id format: {scan_id}"
+        )
+
     scan = db.query(Scan).filter(Scan.scan_id == sid).first()
     if not scan:
-        raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found in database.")
-    
+        raise HTTPException(
+            status_code=404, detail=f"Scan {scan_id} not found in database."
+        )
+
     # Answer is based on DB data, not local files
     answer = ai_engine.answer_question(question, scan_id=scan_id)
     return {
@@ -493,6 +510,7 @@ def ask_question(body: dict = None, db: Session = Depends(get_db)):
 
 
 # ━━━ Dashboard ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 
 @app.get("/dashboard/stats")
 def dashboard_stats(db: Session = Depends(get_db)):
@@ -515,9 +533,26 @@ def dashboard_stats(db: Session = Depends(get_db)):
     }
 
 
+# ━━━ System Monitor ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@app.get("/system/stats")
+def system_stats():
+    """One-shot CPU + RAM snapshot."""
+    return get_system_stats()
+
+
+@app.websocket("/ws/system-stats")
+async def websocket_system_stats(ws: WebSocket):
+    """Stream live CPU + RAM every 2 seconds over WebSocket."""
+    await ws.accept()
+    await stream_system_stats(ws)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 if __name__ == "__main__":
     import uvicorn
+
     # Pass app as import string for reload to work properly
     uvicorn.run("main_api:app", host="0.0.0.0", port=8000, reload=True)

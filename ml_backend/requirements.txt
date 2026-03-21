@@ -25,3 +25,6 @@ google-generativeai
 huggingface-hub
 openai
 python-dotenv
+
+# System Monitoring
+psutil

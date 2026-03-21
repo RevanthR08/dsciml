@@ -14,13 +14,13 @@ import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
-_S3_ENDPOINT   = os.getenv("Bucket_Key", "").rstrip("/")
+_S3_ENDPOINT = os.getenv("Bucket_Key", "").rstrip("/")
 _ACCESS_KEY_ID = os.getenv("Bucket_Access_Key", "")
-_SECRET_KEY    = os.getenv("Bucket_Secret_Key", "")
-BUCKET_NAME    = os.getenv("Bucket_Name") or os.getenv("SUPABASE_BUCKET") or "files_format"
-_REGION        = os.getenv("Bucket_Region") or "ap-northeast-1"
+_SECRET_KEY = os.getenv("Bucket_Secret_Key", "")
+BUCKET_NAME = os.getenv("Bucket_Name") or os.getenv("SUPABASE_BUCKET") or "files_format"
+_REGION = os.getenv("Bucket_Region") or "ap-northeast-1"
 
 # Project ref — used to build public URLs
 _proj_match = re.search(r"https://([^.]+)\.storage\.supabase\.co", _S3_ENDPOINT)
@@ -49,6 +49,7 @@ def _is_configured() -> bool:
 
 def _s3():
     import boto3
+
     return boto3.client(
         "s3",
         endpoint_url=_S3_ENDPOINT,
@@ -82,10 +83,8 @@ def upload_to_bucket(
         logger.warning("Supabase Storage upload failed: %s", e)
         return None
 
-def download_from_bucket(
-    object_name: str,
-    local_path: str
-) -> bool:
+
+def download_from_bucket(object_name: str, local_path: str) -> bool:
     """
     Download a file from the Supabase Storage bucket (S3) to local disk.
     Returns True on success, False on failure.
@@ -93,11 +92,7 @@ def download_from_bucket(
     if not _is_configured():
         return False
     try:
-        _s3().download_file(
-            Bucket=BUCKET_NAME,
-            Key=object_name,
-            Filename=local_path
-        )
+        _s3().download_file(Bucket=BUCKET_NAME, Key=object_name, Filename=local_path)
         logger.info("Downloaded %s/%s → %s", BUCKET_NAME, object_name, local_path)
         return True
     except Exception as e:
@@ -114,8 +109,13 @@ def download_from_bucket_bytes(object_name: str) -> bytes | None:
         return None
     try:
         response = _s3().get_object(Bucket=BUCKET_NAME, Key=object_name)
-        file_bytes = response['Body'].read()
-        logger.info("Downloaded %s/%s (in-memory: %d bytes)", BUCKET_NAME, object_name, len(file_bytes))
+        file_bytes = response["Body"].read()
+        logger.info(
+            "Downloaded %s/%s (in-memory: %d bytes)",
+            BUCKET_NAME,
+            object_name,
+            len(file_bytes),
+        )
         return file_bytes
     except Exception as e:
         logger.warning("Supabase Storage in-memory download failed: %s", e)
