@@ -192,25 +192,28 @@ class TerminalCapture:
         return self.buffer.getvalue()
 
 
-def run_android_forensics():
+def run_android_forensics_from_path(
+    csv_path: str, *, display_name: str | None = None, write_json: bool = True
+) -> dict | None:
     W = 82
     capture = TerminalCapture()
+    shown_name = display_name or csv_path
 
     with contextlib.redirect_stdout(capture):
         print("\n" + "="*W)
         print("  📱  ANDROID FORENSICS SYSTEM  v2.0  —  BEHAVIORAL & POSTURE")
         print("="*W)
-        print(f"  📁 File : {log_file}")
+        print(f"  📁 File : {shown_name}")
 
-        df = load_android_csv_for_db(log_file)
+        df = load_android_csv_for_db(csv_path)
         if df is None:
             print("  ❌ Cannot load CSV.")
-            return
+            return None
 
         print(f"  📊 Logs : {len(df):,}")
         if len(df) == 0:
             print("  ⚠️ Warning: File is empty or could not be parsed correctly.")
-            return
+            return None
 
         pkg_src = next(
             (c for c in df.columns if c in ('package_r', 'package_name', 'package')),
@@ -358,11 +361,6 @@ def run_android_forensics():
         if shown == 0:
             print("  No timestamped threats found.")
 
-        out_dir = 'detected_anomalies'
-        os.makedirs(out_dir, exist_ok=True)
-        ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        out_path = os.path.join(out_dir, f'anomalous_logs_{ts_str}.json')
-
         terminal_summary = capture.get_output()
 
         export = {
@@ -396,12 +394,44 @@ def run_android_forensics():
                 .to_dict(orient='records'),
             }
 
-        with open(out_path, 'w', encoding='utf-8') as f:
-            json.dump(export, f, indent=4)
+        if write_json:
+            out_dir = 'detected_anomalies'
+            os.makedirs(out_dir, exist_ok=True)
+            ts_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+            out_path = os.path.join(out_dir, f'anomalous_logs_{ts_str}.json')
+            with open(out_path, 'w', encoding='utf-8') as f:
+                json.dump(export, f, indent=4)
+            print(f"\n{'='*W}")
+            print(f"  💾 EXPORT → {out_path}")
+            print(f"{'='*W}\n")
 
-        print(f"\n{'='*W}")
-        print(f"  💾 EXPORT → {out_path}")
-        print(f"{'='*W}\n")
+        return export
+
+
+def run_android_forensics():
+    run_android_forensics_from_path(log_file, display_name=log_file, write_json=True)
+
+
+def run_android_forensic_analysis(
+    file_bytes: bytes, filename: str = "upload.csv", return_dict: bool = True
+):
+    """In-memory Android CSV analysis; same export shape as disk-based CLI run."""
+    if not return_dict:
+        raise ValueError("Only return_dict=True is supported for API use.")
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False) as tf:
+        tf.write(file_bytes)
+        path = tf.name
+    try:
+        return run_android_forensics_from_path(
+            path, display_name=filename, write_json=False
+        )
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 if __name__ == '__main__':

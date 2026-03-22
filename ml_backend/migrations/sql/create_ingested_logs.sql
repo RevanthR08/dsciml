@@ -1,0 +1,56 @@
+-- IngestedLog → ingested_logs (PostgreSQL / Supabase SQL editor)
+-- Run once against your project database. Safe to re-run: uses IF NOT EXISTS.
+
+CREATE TABLE IF NOT EXISTS ingested_logs (
+    log_row_id UUID NOT NULL,
+    scan_id UUID NOT NULL,
+    logged_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    windows_event_id INTEGER,
+    user_account VARCHAR(512),
+    opcode VARCHAR(255),
+    opcode_numeric INTEGER,
+    task_category VARCHAR(255),
+    computer VARCHAR(255),
+    source VARCHAR(255),
+    detail TEXT,
+    message TEXT,
+    brief TEXT,
+    windows_internal_id INTEGER,
+    version VARCHAR(64),
+    qualifiers TEXT,
+    level INTEGER,
+    windows_task_id INTEGER,
+    keywords TEXT,
+    record_id BIGINT,
+    provider_name VARCHAR(512),
+    provider_id VARCHAR(255),
+    log_name VARCHAR(255),
+    process_id INTEGER,
+    thread_id INTEGER,
+    machine_name VARCHAR(255),
+    user_sid VARCHAR(255),
+    time_created TIMESTAMP WITH TIME ZONE,
+    activity_id VARCHAR(255),
+    related_activity_id VARCHAR(255),
+    container_log TEXT,
+    matched_query_ids TEXT,
+    bookmark TEXT,
+    level_display_name VARCHAR(255),
+    opcode_display_name VARCHAR(255),
+    task_display_name VARCHAR(255),
+    keywords_display_names TEXT,
+    properties TEXT,
+    security_id VARCHAR(255),
+    account_name VARCHAR(255),
+    account_domain VARCHAR(255),
+    logon_id VARCHAR(128),
+    read_operation VARCHAR(255),
+    ip VARCHAR(128),
+    label VARCHAR(64),
+    PRIMARY KEY (log_row_id),
+    CONSTRAINT fk_ingested_logs_scan
+        FOREIGN KEY (scan_id) REFERENCES scans (scan_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS ix_ingested_logs_scan_label
+    ON ingested_logs (scan_id, label);
