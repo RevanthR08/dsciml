@@ -1,17 +1,48 @@
 import uuid
 from sqlalchemy import (
-    Column, String, Integer, BigInteger, Text, Numeric, Boolean,
-    ForeignKey, UniqueConstraint, Index, text,
+    Column,
+    String,
+    Integer,
+    Text,
+    Numeric,
+    Boolean,
+    ForeignKey,
+    UniqueConstraint,
+    Index,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID, TIMESTAMP
 from sqlalchemy.orm import relationship
 from database import Base
 
 
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = (UniqueConstraint("email"),)
+
+    user_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(String(255), nullable=False, unique=True)
+    password = Column(String(255), nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True))
+
+    scans = relationship("Scan", back_populates="user", cascade="all, delete-orphan")
+
+    def to_dict(self):
+        return {
+            "user_id": str(self.user_id),
+            "email": self.email,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class Scan(Base):
     __tablename__ = "scans"
+    __table_args__ = (
+        Index('idx_scan_user_file', 'user_id', 'file_name'),
+    )
 
     scan_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id", ondelete="CASCADE"), default=uuid.UUID("356721c8-1559-4c00-9aec-8be06d861028"))
     generated_at = Column(TIMESTAMP(timezone=True))
     file_name = Column(String(255))
     total_logs = Column(Integer, nullable=False)
@@ -26,9 +57,9 @@ class Scan(Base):
     # windows | android | NULL (legacy scans)
     log_platform = Column(String(16))
 
+    user = relationship("User", back_populates="scans")
     categories = relationship("AnomalyCategory", back_populates="scan", cascade="all, delete-orphan")
     events = relationship("AnomalousEvent", back_populates="scan", cascade="all, delete-orphan")
-    ingested_logs = relationship("IngestedLog", back_populates="scan", cascade="all, delete-orphan")
     android_logs = relationship("AndroidLog", back_populates="scan", cascade="all, delete-orphan")
     chains = relationship("AttackChain", back_populates="scan", cascade="all, delete-orphan")
     travels = relationship("ImpossibleTravel", back_populates="scan", cascade="all, delete-orphan")
@@ -51,7 +82,10 @@ class Scan(Base):
 
 class AnomalyCategory(Base):
     __tablename__ = "anomaly_categories"
-    __table_args__ = (UniqueConstraint("scan_id", "category_name"),)
+    __table_args__ = (
+        UniqueConstraint("scan_id", "category_name"),
+        Index('idx_category_scan', 'scan_id'),
+    )
 
     category_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.scan_id", ondelete="CASCADE"))
@@ -60,6 +94,7 @@ class AnomalyCategory(Base):
     tactic = Column(String(100))
     risk_score = Column(Integer, nullable=False)
     event_count = Column(Integer, nullable=False)
+    ai_summary = Column(Text)
 
     scan = relationship("Scan", back_populates="categories")
     events = relationship("AnomalousEvent", back_populates="category", cascade="all, delete-orphan")
@@ -72,116 +107,7 @@ class AnomalyCategory(Base):
             "tactic": self.tactic,
             "risk_score": self.risk_score,
             "event_count": self.event_count,
-        }
-
-
-class IngestedLog(Base):
-    """
-    Full source log row for a scan (normal + anomalous). Segregation uses *label*
-    from the dataset (e.g. normal / suspicious); this is separate from AnomalousEvent.
-    """
-    __tablename__ = "ingested_logs"
-    __table_args__ = (
-        Index("ix_ingested_logs_scan_label", "scan_id", "label"),
-    )
-
-    log_row_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.scan_id", ondelete="CASCADE"), nullable=False)
-
-    logged_at = Column(TIMESTAMP(timezone=True), nullable=False)
-    windows_event_id = Column(Integer)
-    user_account = Column(String(512))
-    opcode = Column(String(255))
-    opcode_numeric = Column(Integer)
-    task_category = Column(String(255))
-    computer = Column(String(255))
-    source = Column(String(255))
-    detail = Column(Text)
-    message = Column(Text)
-    brief = Column(Text)
-
-    windows_internal_id = Column(Integer)
-    version = Column(String(64))
-    qualifiers = Column(Text)
-    level = Column(Integer)
-    windows_task_id = Column(Integer)
-    keywords = Column(Text)
-    record_id = Column(BigInteger)
-    provider_name = Column(String(512))
-    provider_id = Column(String(255))
-    log_name = Column(String(255))
-    process_id = Column(Integer)
-    thread_id = Column(Integer)
-    machine_name = Column(String(255))
-    user_sid = Column(String(255))
-    time_created = Column(TIMESTAMP(timezone=True))
-    activity_id = Column(String(255))
-    related_activity_id = Column(String(255))
-    container_log = Column(Text)
-    matched_query_ids = Column(Text)
-    bookmark = Column(Text)
-    level_display_name = Column(String(255))
-    opcode_display_name = Column(String(255))
-    task_display_name = Column(String(255))
-    keywords_display_names = Column(Text)
-    properties = Column(Text)
-    security_id = Column(String(255))
-    account_name = Column(String(255))
-    account_domain = Column(String(255))
-    logon_id = Column(String(128))
-    read_operation = Column(String(255))
-    ip = Column(String(128))
-    label = Column(String(64))
-
-    scan = relationship("Scan", back_populates="ingested_logs")
-
-    def to_dict(self):
-        return {
-            "log_row_id": str(self.log_row_id),
-            "scan_id": str(self.scan_id),
-            "logged_at": self.logged_at.isoformat() if self.logged_at else None,
-            "windows_event_id": self.windows_event_id,
-            "user_account": self.user_account,
-            "opcode": self.opcode,
-            "opcode_numeric": self.opcode_numeric,
-            "task_category": self.task_category,
-            "computer": self.computer,
-            "source": self.source,
-            "detail": self.detail,
-            "message": self.message,
-            "brief": self.brief,
-            "windows_internal_id": self.windows_internal_id,
-            "version": self.version,
-            "qualifiers": self.qualifiers,
-            "level": self.level,
-            "windows_task_id": self.windows_task_id,
-            "keywords": self.keywords,
-            "record_id": int(self.record_id) if self.record_id is not None else None,
-            "provider_name": self.provider_name,
-            "provider_id": self.provider_id,
-            "log_name": self.log_name,
-            "process_id": self.process_id,
-            "thread_id": self.thread_id,
-            "machine_name": self.machine_name,
-            "user_sid": self.user_sid,
-            "time_created": self.time_created.isoformat() if self.time_created else None,
-            "activity_id": self.activity_id,
-            "related_activity_id": self.related_activity_id,
-            "container_log": self.container_log,
-            "matched_query_ids": self.matched_query_ids,
-            "bookmark": self.bookmark,
-            "level_display_name": self.level_display_name,
-            "opcode_display_name": self.opcode_display_name,
-            "task_display_name": self.task_display_name,
-            "keywords_display_names": self.keywords_display_names,
-            "properties": self.properties,
-            "security_id": self.security_id,
-            "account_name": self.account_name,
-            "account_domain": self.account_domain,
-            "logon_id": self.logon_id,
-            "read_operation": self.read_operation,
-            "ip": self.ip,
-            "label": self.label,
+            "ai_summary": self.ai_summary,
         }
 
 
@@ -265,6 +191,9 @@ class AndroidLog(Base):
 
 class AnomalousEvent(Base):
     __tablename__ = "anomalous_events"
+    __table_args__ = (
+        Index('idx_event_scan', 'scan_id'),
+    )
 
     event_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.scan_id", ondelete="CASCADE"))
@@ -292,6 +221,9 @@ class AnomalousEvent(Base):
 
 class ImpossibleTravel(Base):
     __tablename__ = "impossible_travels"
+    __table_args__ = (
+        Index('idx_travel_scan', 'scan_id'),
+    )
 
     travel_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.scan_id", ondelete="CASCADE"))
@@ -318,6 +250,9 @@ class ImpossibleTravel(Base):
 
 class AttackChain(Base):
     __tablename__ = "attack_chains"
+    __table_args__ = (
+        Index('idx_chain_scan', 'scan_id'),
+    )
 
     chain_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.scan_id", ondelete="CASCADE"))

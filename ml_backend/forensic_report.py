@@ -8,12 +8,6 @@ sys.path.append(os.getcwd())
 from log_analyzer.models import IsolationForest
 from log_analyzer import preprocessing
 
-# Check for command-line argument first, then environment variable, else use default
-if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
-    log_file = sys.argv[1]
-else:
-    log_file = os.getenv('SOC_LOG_FILE')
-
 IMPOSSIBLE_TRAVEL_MAX_TRANSITIONS = 50
 
 THREAT_METADATA = {
@@ -201,7 +195,35 @@ class TerminalCapture:
         return self.buffer.getvalue()
 
 
-def run_forensic_analysis():
+def run_forensic_analysis(file_bytes: bytes = None, filename: str = None, return_dict=True):
+    """
+    Execute forensic analysis on file bytes (in-memory, zero local storage).
+    Supports CSV and EVTX formats.
+    
+    Args:
+        file_bytes: Raw file content as bytes (replaces OS environ)
+        filename: Original filename (to detect format: .csv or .evtx)
+        return_dict: If True, returns dict; if False, writes to disk (backward compat)
+    
+    Returns:
+        dict with analysis results (if return_dict=True), or path (if writing to disk)
+    """
+    # Backward compat: fall back to environment variable if file_bytes not provided
+    if file_bytes is None:
+        log_file = None
+        if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
+            log_file = sys.argv[1]
+        else:
+            log_file = os.getenv('SOC_LOG_FILE')
+        
+        if not log_file:
+            return {"error": "No log file provided. Pass file_bytes parameter or set SOC_LOG_FILE environment variable."}
+        
+        # Fall back to reading from disk
+        with open(log_file, 'rb') as f:
+            file_bytes = f.read()
+        filename = os.path.basename(log_file)
+    
     W = 82
     capture = TerminalCapture()
 
@@ -209,21 +231,43 @@ def run_forensic_analysis():
         print("\n" + "="*W)
         print("  🛡️  SOC DETECTION SYSTEM  v3.6  —  MESSAGE-FREE EVTX EDITION")
         print("="*W)
-        print(f"  📁 File : {log_file}")
+        print(f"  📁 File : {filename}")
+        print(f"  💾 Mode : In-Memory Processing (zero disk storage)")
 
+        # ⚡ Detect format from filename
+        is_evtx = filename.lower().endswith('.evtx')
+        
         try:
-            with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
-                first_line = f.readline()
-            sep = '|' if '|' in first_line else ','
-
-            try:
-                df = pd.read_csv(log_file, sep=sep, low_memory=False)
-            except Exception:
-                df = pd.read_csv(log_file, sep=sep, quoting=3, low_memory=False)
+            if is_evtx:
+                # For EVTX: Temporarily write to disk, parse, then delete immediately
+                import tempfile
+                temp_evtx = tempfile.NamedTemporaryFile(suffix='.evtx', delete=False)
+                try:
+                    temp_evtx.write(file_bytes)
+                    temp_evtx.close()
+                    
+                    # Parse EVTX to DataFrame
+                    from evtx_parser import parse_evtx_file
+                    df = parse_evtx_file(temp_evtx.name)
+                finally:
+                    # Delete temp EVTX immediately (very brief lifetime)
+                    os.unlink(temp_evtx.name)
+            else:
+                # For CSV: Use StringIO (pure in-memory, no disk)
+                file_text = file_bytes.decode('utf-8', errors='ignore')
+                first_line = file_text.split('\n')[0] if file_text else ''
+                sep = '|' if '|' in first_line else ','
+                
+                csv_buffer = io.StringIO(file_text)
+                try:
+                    df = pd.read_csv(csv_buffer, sep=sep, low_memory=False)
+                except Exception:
+                    csv_buffer.seek(0)
+                    df = pd.read_csv(csv_buffer, sep=sep, quoting=3, low_memory=False)
         except Exception as e:
             print(f"  ❌ Cannot load: {e}")
-            return
-
+            return {"error": f"Failed to parse file: {e}"}
+        
         print(f"  📊 Logs : {len(df):,}")
         if len(df) == 0:
             print("  ⚠️ Warning: File is empty or could not be parsed correctly.")
@@ -233,19 +277,61 @@ def run_forensic_analysis():
         print(f"  📊 Columns : {df.columns.tolist()}")
         df.columns = [str(c).strip().lower() for c in df.columns]
         
+        # ⚡ Remove duplicate columns (keep first occurrence)
+        # This handles case like both 'opcode' and 'Opcode' becoming 'opcode'
+        df = df.loc[:, ~df.columns.duplicated(keep='first')]
+        
         # ⚡ Mapping logic: find which CSV column matches our internal requirement
         COL_MAP = {
-            'logged':         next((c for c in df.columns if c in ['logged', 'timegenerated', 'systemtime', 'timestamp']), None),
-            'event_id':       next((c for c in df.columns if c in ['event_id', 'event id', 'eventid', 'event_type']),      None),
-            'user':           next((c for c in df.columns if c in ['user', 'userid']),                                    None),
-            'opcode':         next((c for c in df.columns if c in ['opcode', 'app_name']),                                None),
-            'opcode_display': next((c for c in df.columns if c in ['opcodedisplayname', 'opcode display name', 'opcodedisplay']), None),
-            'task_category':  next((c for c in df.columns if c in ['task_category', 'task category', 'taskcategory', 'task', 'event_type']), None),
-            'log_name':       next((c for c in df.columns if c in ['logname', 'log name', 'channel']),                    None),
-            'account_domain': next((c for c in df.columns if c in ['accountdomain', 'account domain']),                   None),
-            'computer':       next((c for c in df.columns if c in ['computer', 'device_id']),                             None),
-            'source':         next((c for c in df.columns if c in ['source', 'provider', 'name']),                        None),
-            'process_id':     next((c for c in df.columns if c in ['processid', 'process_id', 'pid', 'execution processid']), None),
+            'logged': next(
+                (c for c in df.columns if c in ['logged', 'timegenerated', 'systemtime', 'timestamp']),
+                None,
+            ),
+            'event_id': next(
+                (c for c in df.columns if c in ['event_id', 'event id', 'eventid', 'event_type']),
+                None,
+            ),
+            'user': next(
+                (c for c in df.columns if c in ['user', 'userid', 'accountname']),
+                None,
+            ),
+            'opcode': next((c for c in df.columns if c in ['opcode', 'app_name']), None),
+            'opcode_display': next(
+                (c for c in df.columns if c in ['opcodedisplayname', 'opcode display name', 'opcodedisplay']),
+                None,
+            ),
+            'task_category': next(
+                (
+                    c
+                    for c in df.columns
+                    if c in ['task_category', 'task category', 'taskcategory', 'task', 'event_type']
+                ),
+                None,
+            ),
+            'log_name': next(
+                (c for c in df.columns if c in ['logname', 'log name', 'channel']),
+                None,
+            ),
+            'account_domain': next(
+                (c for c in df.columns if c in ['accountdomain', 'account domain']),
+                None,
+            ),
+            'computer': next(
+                (c for c in df.columns if c in ['computer', 'device_id', 'machinename']),
+                None,
+            ),
+            'source': next(
+                (c for c in df.columns if c in ['source', 'provider', 'name', 'providername']),
+                None,
+            ),
+            'process_id': next(
+                (
+                    c
+                    for c in df.columns
+                    if c in ['processid', 'process_id', 'pid', 'execution processid']
+                ),
+                None,
+            ),
         }
         
         optional = ('source', 'opcode_display', 'log_name', 'account_domain')
@@ -592,11 +678,6 @@ def run_forensic_analysis():
         if not travel_found:
             print("  No impossible travel detected.")
 
-        out_dir  = 'detected_anomalies'
-        os.makedirs(out_dir, exist_ok=True)
-        ts_str   = datetime.now().strftime('%Y%m%d_%H%M%S')
-        out_path = os.path.join(out_dir, f'anomalous_logs_{ts_str}.json')
-
         terminal_summary = capture.get_output()
 
         export = {
@@ -630,12 +711,41 @@ def run_forensic_analysis():
                                   .to_dict(orient='records'),
             }
 
-        with open(out_path, 'w', encoding='utf-8') as f:
-            json.dump(export, f, indent=4)
+        # Add Normal activity logs at the end
+        normal_df = df[df['AttackCategory'] == 'Normal'].copy()
+        if len(normal_df) > 0:
+            normal_df['logged'] = normal_df['logged'].astype(str)
+            meta = THREAT_METADATA.get('Normal', {})
+            export['Normal'] = {
+                'mitre_id':   meta.get('MitreID', '?'),
+                'tactic':     meta.get('Tactic',  '?'),
+                'risk_score': meta.get('Risk', 0),
+                'count':      len(normal_df),
+                'events':     normal_df[['logged', 'event ID', 'User', 'computer',
+                                         'task Category', 'MitreID', 'Tactic', 'RiskScore']]
+                                    .to_dict(orient='records'),
+            }
 
-        print(f"\n{'='*W}")
-        print(f"  💾 EXPORT → {out_path}")
-        print(f"{'='*W}\n")
+        if return_dict:
+            # Return data in-memory (new approach)
+            print(f"\n{'='*W}")
+            print(f"  💾 ANALYSIS COMPLETE (in-memory, no local storage)")
+            print(f"{'='*W}\n")
+            return export
+        else:
+            # Write to disk (backward compat)
+            out_dir  = 'detected_anomalies'
+            os.makedirs(out_dir, exist_ok=True)
+            ts_str   = datetime.now().strftime('%Y%m%d_%H%M%S')
+            out_path = os.path.join(out_dir, f'anomalous_logs_{ts_str}.json')
+
+            with open(out_path, 'w', encoding='utf-8') as f:
+                json.dump(export, f, indent=4)
+
+            print(f"\n{'='*W}")
+            print(f"  💾 EXPORT → {out_path}")
+            print(f"{'='*W}\n")
+            return out_path
 
 
 if __name__ == '__main__':

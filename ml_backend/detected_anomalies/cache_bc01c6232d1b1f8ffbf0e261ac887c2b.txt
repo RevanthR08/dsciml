@@ -1,0 +1,4 @@
+Error: Client error '401 Unauthorized' for url 'https://router.huggingface.co/v1/chat/completions' (Request ID: Root=1-69bd90c7-28d85cdd5058999439adb2d1;837f5666-e39c-4146-bb5a-f9c6399613b1)
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401
+
+User Access Token "Read" is expired
