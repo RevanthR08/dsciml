@@ -13,14 +13,16 @@ from storage_supabase import empty_bucket
 
 def clean_database():
     """
-    Deletes all rows from every table registered in ``db_models`` (including
-    ``android_logs``, ``ingested_logs``, ``scans``, etc.) and empties the bucket.
+    Deletes all rows from application tables registered in ``db_models``, except
+    ``users`` (accounts are preserved). Empties the storage bucket.
     Schema unchanged; no DROP/CREATE.
     """
     print("🚀 Connecting to Supabase...")
 
-    print("🗑️ Truncating all application tables (keeping schema)...")
-    names = sorted(Base.metadata.tables.keys())
+    print("🗑️ Truncating application tables (users exempt, schema kept)...")
+    names = sorted(
+        n for n in Base.metadata.tables.keys() if n != "users"
+    )
     if names:
         print(f"   Tables: {', '.join(names)}")
         quoted = ", ".join(f'"{n}"' for n in names)

@@ -3,6 +3,10 @@ import json
 import glob
 import time
 import importlib
+import threading
+from pathlib import Path
+from typing import Mapping
+
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
@@ -22,33 +26,195 @@ class UUIDEncoder(json.JSONEncoder):
             return str(obj)
         return super().default(obj)
 
-# Load API Keys
-load_dotenv()
-GROQ_KEY = os.getenv("GROQ_API_KEY")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+def _env_api_key(*names: str) -> str | None:
+    """First non-empty value; strip whitespace/quotes (common .env mistakes)."""
+    for name in names:
+        raw = os.getenv(name)
+        if not raw:
+            continue
+        v = raw.strip().strip("'\"")
+        if not v:
+            continue
+        if v.lower().startswith("bearer "):
+            v = v[7:].strip()
+        if v:
+            return v
+    return None
+
+
+def _env_str(name: str) -> str | None:
+    raw = os.getenv(name)
+    if not raw:
+        return None
+    v = raw.strip().strip("'\"")
+    return v if v else None
+
+
+def _env_url(name: str) -> str | None:
+    """Non-empty URL-ish string; strip trailing slash for OpenAI client base_url."""
+    v = _env_str(name)
+    return v.rstrip("/") if v else None
+
+
+def _completion_text(response) -> str:
+    """
+    Chat completions often return message.content=None (empty or tool-only).
+    Never return None — Postgres Text columns would store NULL and look 'broken' in UI.
+    """
+    try:
+        msg = response.choices[0].message
+        text = getattr(msg, "content", None)
+        if text is not None and str(text).strip():
+            return str(text)
+    except (IndexError, AttributeError, TypeError):
+        pass
+    return "[Model returned no text for this request.]"
+
+
+# Load API Keys (path: this package dir — cwd may not be ml_backend when using uvicorn)
+# override=True: stale Windows/User env vars (e.g. LLM_API_KEY) must not shadow ml_backend/.env
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
+load_dotenv(override=True)
+
+
+def _openrouter_key_only() -> str | None:
+    """Keys meant for OpenRouter (never use GROQ_API_KEY here)."""
+    return _env_api_key("OP_ROUTER", "OPENROUTER_API_KEY", "LLM_API_KEY")
+
+
+def _http_llm_key() -> str | None:
+    """
+    Read at use-time so .env is visible even if this module imported early.
+
+    OP_ROUTER / OPENROUTER_API_KEY are checked before LLM_API_KEY so a bad LLM_API_KEY
+    in the environment does not shadow a good OP_ROUTER in .env.
+
+    Canonical OpenRouter .env:
+      OP_ROUTER=sk-or-v1-...  (or OPENROUTER_API_KEY / LLM_API_KEY)
+      LLM_BASE_URL=https://openrouter.ai/api/v1
+      LLM_MODEL=provider/model
+    Groq: GROQ_API_KEY + LLM_BASE_URL=https://api.groq.com/openai/v1
+    """
+    return _env_api_key(
+        "OP_ROUTER",
+        "OPENROUTER_API_KEY",
+        "LLM_API_KEY",
+        "GROQ_API_KEY",
+    )
+
+
+def _ping_openrouter(base: str, headers: Mapping[str, str]) -> None:
+    """One GET /models with the same auth headers OpenRouter expects."""
+    if _env_str("LLM_SKIP_VERIFY"):
+        return
+    try:
+        import httpx
+
+        url = f"{base.rstrip('/')}/models"
+        r = httpx.get(url, headers=dict(headers), timeout=25.0)
+        if r.status_code == 200:
+            print("✓ OpenRouter: API key accepted (GET /models OK).")
+        else:
+            print(
+                f"⚠️  OpenRouter: GET /models → {r.status_code}. "
+                f"If 401: key or account issue on OpenRouter's side. Snippet: {r.text[:280]!r}"
+            )
+    except Exception as e:
+        print(f"⚠️  OpenRouter verify (GET /models) failed: {e}")
+
+
 DEFAULT_USER_ID = "356721c8-1559-4c00-9aec-8be06d861028"
 MAX_TOOL_CALLS = 5
 
-# Use Groq as primary AI backend (OpenAI-compatible)
-AI_MODE = 'GROQ' if GROQ_KEY else 'GEMINI'
 
 class SecurityAI:
     def __init__(self):
-        print(f"🤖 Initializing AI in {AI_MODE} mode...")
-        if AI_MODE == 'GROQ':
-            # Groq via OpenAI-compatible client
-            self.client = OpenAI(
-                api_key=GROQ_KEY,
-                base_url="https://api.groq.com/openai/v1"
-            )
-            self.model_name = "llama-3.3-70b-versatile"  # Groq's Llama 70B model
+        # Resolve keys after load_dotenv (avoid stale module-level reads).
+        http_key = _http_llm_key()
+        gemini_key = _env_api_key("GEMINI_API_KEY")
+
+        if http_key:
+            self._ai_mode = "HTTP"
+        elif gemini_key:
+            self._ai_mode = "GEMINI"
         else:
-            # Fallback to Gemini if Groq not available
-            warnings.filterwarnings('ignore', message='.*google.generativeai.*')
+            raise ValueError(
+                "No LLM API key configured. OpenRouter: OP_ROUTER or OPENROUTER_API_KEY "
+                "or LLM_API_KEY, plus LLM_BASE_URL and LLM_MODEL. "
+                "Groq: GROQ_API_KEY + LLM_BASE_URL. Gemini: GEMINI_API_KEY."
+            )
+
+        print(f"🤖 Initializing AI in {self._ai_mode} mode...")
+        self.model = None
+        self.client = None
+        self.model_name = ""
+        # httpx/OpenAI sync client is not thread-safe; parallel category summaries corrupted headers (401).
+        self._http_lock = threading.Lock()
+
+        if self._ai_mode == "HTTP":
+            base = _env_url("LLM_BASE_URL") or "https://openrouter.ai/api/v1"
+            if "openrouter.ai" in base.lower():
+                # Never send Groq (or other) keys to OpenRouter — use only OR* / LLM_API_KEY.
+                or_key = _openrouter_key_only()
+                if or_key:
+                    http_key = or_key
+                elif _env_api_key("GROQ_API_KEY"):
+                    print(
+                        "⚠️  LLM_BASE_URL is OpenRouter but only GROQ_API_KEY is set. "
+                        "Set OP_ROUTER or OPENROUTER_API_KEY (sk-or-v1-... from openrouter.ai/keys)."
+                    )
+            # Newlines / stray chars from .env breaks Bearer token.
+            http_key = "".join(http_key.split())
+            # OpenAI-compatible client; force Authorization on every request.
+            hdrs: dict[str, str] = {"Authorization": f"Bearer {http_key}"}
+            if "openrouter.ai" in base.lower():
+                hdrs["HTTP-Referer"] = os.getenv(
+                    "OPENROUTER_HTTP_REFERER", "https://localhost"
+                )
+                hdrs["X-Title"] = os.getenv(
+                    "OPENROUTER_APP_TITLE", "DSCIML Forensics"
+                )
+                if not http_key.startswith("sk-or-"):
+                    print(
+                        "⚠️  OpenRouter API keys usually start with sk-or-v1-. "
+                        "401 User not found = OpenRouter does not recognize this token."
+                    )
+                _ping_openrouter(base, hdrs)
+            self.client = OpenAI(
+                api_key=http_key,
+                base_url=base,
+                default_headers=hdrs,
+            )
+            self.model_name = _env_str("LLM_MODEL") or "stepfun/step-3.5-flash"
+        else:
+            # Gemini (not OpenAI-compatible; optional custom endpoint for Vertex / proxies)
+            warnings.filterwarnings("ignore", message=".*google.generativeai.*")
             genai = importlib.import_module("google.generativeai")
-            genai.configure(api_key=GEMINI_KEY)
-            self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            self.client = None
+            gemini_model = (
+                _env_str("LLM_MODEL")
+                or _env_str("GEMINI_MODEL")
+                or "gemini-1.5-flash-latest"
+            )
+            endpoint = _env_url("GEMINI_API_BASE")
+            if endpoint:
+                try:
+                    from google.api_core import client_options as gco
+
+                    genai.configure(
+                        api_key=gemini_key,
+                        client_options=gco.ClientOptions(api_endpoint=endpoint),
+                    )
+                except Exception:
+                    genai.configure(api_key=gemini_key)
+            else:
+                genai.configure(api_key=gemini_key)
+            self.model = genai.GenerativeModel(gemini_model)
+
+    def _http_chat(self, **kwargs):
+        """Thread-safe chat.completions (shared httpx client is not concurrent-safe)."""
+        assert self.client is not None
+        with self._http_lock:
+            return self.client.chat.completions.create(**kwargs)
 
     def _resolve_scan_context(self, scan_id=None, user_id=DEFAULT_USER_ID):
         db = SessionLocal()
@@ -158,16 +324,14 @@ class SecurityAI:
 
     def _summarize_category_openai(self, category_payload, scan_id, user_id):
         """
-        Summarize a category using Groq (with tools) or Gemini (fallback).
-        Both support tool calling for DB lookups.
+        Summarize a category using the HTTP LLM (OpenAI-compatible) or Gemini.
         """
-        if AI_MODE == 'GROQ':
+        if self._ai_mode == "HTTP":
             return self._summarize_category_groq_with_tools(category_payload, scan_id, user_id)
-        else:
-            return self._summarize_category_gemini_with_tools(category_payload, scan_id, user_id)
+        return self._summarize_category_gemini_with_tools(category_payload, scan_id, user_id)
 
     def _summarize_category_groq_with_tools(self, category_payload, scan_id, user_id):
-        """Summarize using Groq with grouped data (no tools needed - data already aggregated)."""
+        """Summarize using OpenAI-compatible chat API (grouped DB payload; no tool calls)."""
         category_name = category_payload['category_name']
         
         prompt = f"""
@@ -193,24 +357,20 @@ class SecurityAI:
         
         for attempt in range(3):
             try:
-                print(f"📡 [Groq] Analyzing category: '{category_name}'...")
+                print(f"📡 [{self._ai_mode}] Analyzing category: '{category_name}'...")
                 
                 messages = [
                     {"role": "system", "content": "You are a Senior SOC Forensic Lead analyzing security incidents from aggregated database data."},
                     {"role": "user", "content": prompt}
                 ]
                 
-                # Call Groq without tools (grouped data is comprehensive)
-                response = self.client.chat.completions.create(
+                response = self._http_chat(
                     model=self.model_name,
                     messages=messages,
-                    max_tokens=2000
+                    max_tokens=2000,
                 )
                 
-                # Extract final text response
-                if response.choices[0].message.content:
-                    return response.choices[0].message.content
-                return "No summary generated."
+                return _completion_text(response)
                 
             except Exception as e:
                 if "429" in str(e) or "rate" in str(e).lower():
@@ -218,7 +378,7 @@ class SecurityAI:
                     print(f"⚠️ Rate limited. Waiting {wait}s...")
                     time.sleep(wait)
                     continue
-                print(f"⚠️ Error in Groq summarization: {e}")
+                print(f"⚠️ Error in HTTP LLM summarization: {e}")
                 return f"Error: {e}"
         
         return "Failed after retries."
@@ -334,7 +494,7 @@ class SecurityAI:
         return "Failed after retries."
 
     def analyze_category(self, category, events):
-        """Analyzes events using Groq backend."""
+        """Analyzes events using the HTTP LLM (OpenAI-compatible client)."""
         sample_size = 500
         sample_data = events[:sample_size]
         
@@ -365,17 +525,17 @@ class SecurityAI:
 
         for attempt in range(3):
             try:
-                print(f"📡 [Groq] Analyzing '{category}'...")
+                print(f"📡 [{self._ai_mode}] Analyzing '{category}'...")
                 messages = [
                     {"role": "system", "content": "You are a Senior SOC Analyst."},
                     {"role": "user", "content": prompt}
                 ]
-                response = self.client.chat.completions.create(
+                response = self._http_chat(
                     model=self.model_name,
                     messages=messages,
-                    max_tokens=1500
+                    max_tokens=1500,
                 )
-                return response.choices[0].message.content
+                return _completion_text(response)
             except Exception as e:
                 if "429" in str(e):
                     wait = 30
@@ -412,22 +572,34 @@ class SecurityAI:
         ## 🛡️ Strategic Remediation Plan
         """
         try:
-            messages = [
-                {"role": "system", "content": "You are a CISO creating a forensic report."},
-                {"role": "user", "content": prompt}
-            ]
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                max_tokens=2000
-            )
-            return response.choices[0].message.content
+            if self.client is not None:
+                messages = [
+                    {
+                        "role": "system",
+                        "content": "You are a CISO creating a forensic report.",
+                    },
+                    {"role": "user", "content": prompt},
+                ]
+                response = self._http_chat(
+                    model=self.model_name,
+                    messages=messages,
+                    max_tokens=2000,
+                )
+                return _completion_text(response)
+            if self.model is not None:
+                r = self.model.generate_content(prompt)
+                if r.candidates and r.candidates[0].content.parts:
+                    for part in r.candidates[0].content.parts:
+                        if hasattr(part, "text"):
+                            return part.text
+                return "No briefing generated."
+            return "Error: no LLM client configured."
         except Exception as e:
             return f"Error: {e}"
 
     def answer_question(self, question, scan_id=None):
         """
-        Answer a security question about a specific scan using Groq.
+        Answer a security question about a specific scan (OpenAI-compatible or Gemini).
         All data comes from the database, not local files.
         """
         if not scan_id:
@@ -465,17 +637,29 @@ class SecurityAI:
             
             for attempt in range(3):
                 try:
-                    print(f"📡 [Groq] Answering question...")
-                    messages = [
-                        {"role": "system", "content": "You are a precise SOC Forensic Analyst."},
-                        {"role": "user", "content": prompt}
-                    ]
-                    response = self.client.chat.completions.create(
-                        model=self.model_name,
-                        messages=messages,
-                        max_tokens=1000
-                    )
-                    return response.choices[0].message.content
+                    print(f"📡 [{self._ai_mode}] Answering question...")
+                    if self.client is not None:
+                        messages = [
+                            {
+                                "role": "system",
+                                "content": "You are a precise SOC Forensic Analyst.",
+                            },
+                            {"role": "user", "content": prompt},
+                        ]
+                        response = self._http_chat(
+                            model=self.model_name,
+                            messages=messages,
+                            max_tokens=1000,
+                        )
+                        return _completion_text(response)
+                    if self.model is not None:
+                        r = self.model.generate_content(prompt)
+                        if r.candidates and r.candidates[0].content.parts:
+                            for part in r.candidates[0].content.parts:
+                                if hasattr(part, "text"):
+                                    return part.text
+                        return "No answer generated."
+                    return "Error: no LLM client configured."
                 except Exception as e:
                     if "429" in str(e) or "rate" in str(e).lower():
                         wait = 30
@@ -502,7 +686,8 @@ class SecurityAI:
         print(f"🚀 Summarizing {len(grouped_payload)} categories for scan {target_scan.scan_id}...")
 
         category_summaries = {}
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        # One worker: httpx OpenAI client is not thread-safe; lock serializes HTTP anyway.
+        with ThreadPoolExecutor(max_workers=1) as executor:
             futures = {}
             for _, payload in grouped_payload.items():
                 future = executor.submit(
@@ -540,6 +725,8 @@ class SecurityAI:
             f"## {k}\n{v}" for k, v in category_summaries.items() if v
         ]
         briefing = self.generate_final_briefing(ordered_summaries)
+        if not briefing or not str(briefing).strip():
+            return "[Executive briefing: model returned no text.]"
         return briefing
 
 if __name__ == "__main__":

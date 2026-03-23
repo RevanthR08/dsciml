@@ -1,4 +1,6 @@
 import sys, os, contextlib, io, json
+import re
+import warnings
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -91,22 +93,216 @@ def apply_threats(df_in: pd.DataFrame) -> pd.DataFrame:
     return df_in
 
 
-def load_android_csv_for_db(path: str) -> pd.DataFrame | None:
+def _parse_mm_ss_or_hms_to_datetime(val, base_date: datetime | None = None) -> pd.Timestamp | None:
     """
-    Load an Android CSV, normalize headers, and return a DataFrame ready for
-    apply_threats (same shape as run_android_forensics uses). None on failure.
+    Android CSV often uses *timestamp* = elapsed session time, e.g. ``25:17.2`` meaning
+    25 minutes and 17.2 seconds (not wall-clock). Anchor to *base_date* midnight UTC.
+    Also accepts ``H:M:S`` when the first field is <= 23.
     """
-    try:
-        df = pd.read_csv(path, low_memory=False)
-    except Exception:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
-    if df.empty:
+    s = str(val).strip()
+    if not s or s.lower() in ("nan", "none", "nat"):
+        return None
+    if base_date is None:
+        base_date = datetime.utcnow().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+    base_ts = pd.Timestamp(base_date)
+    if s.count(":") == 1 and re.match(r"^\d+:\d+(?:\.\d+)?$", s):
+        a, b = s.split(":", 1)
+        try:
+            mm = int(a)
+            sec = float(b)
+            return base_ts + pd.Timedelta(minutes=mm, seconds=sec)
+        except ValueError:
+            return None
+    if s.count(":") == 2:
+        parts = s.split(":")
+        try:
+            h, m, sec = int(parts[0]), int(parts[1]), float(parts[2])
+            if h <= 23:
+                return base_ts + pd.Timedelta(hours=h, minutes=m, seconds=sec)
+            return base_ts + pd.Timedelta(hours=h, minutes=m, seconds=sec)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_android_logged_column(raw: pd.Series) -> pd.Series:
+    """
+    Parse timestamps from Android exports: Unix s/ms/us, ISO strings, mixed text,
+    or compact ``MM:SS.s`` session offsets (see *_parse_mm_ss_or_hms_to_datetime*).
+    """
+    s = raw
+    num = pd.to_numeric(s, errors="coerce")
+    n = len(s)
+    if n == 0:
+        return pd.Series(dtype="datetime64[ns]")
+    num_ok = int(num.notna().sum())
+    if num_ok > n * 0.85:
+        med = num.median(skipna=True)
+        if pd.isna(med):
+            med = 0.0
+        else:
+            med = float(med)
+        if med > 1e16:
+            t = pd.to_datetime(num, unit="us", errors="coerce")
+        elif med > 1e12:
+            t = pd.to_datetime(num, unit="ms", errors="coerce")
+        elif med > 1e9:
+            t = pd.to_datetime(num, unit="s", errors="coerce")
+        else:
+            t = pd.Series(pd.NaT, index=s.index)
+        if t.notna().sum() > n * 0.5:
+            return t
+
+    ss = s.astype(str).str.strip()
+    ss = ss.mask(ss.str.lower().isin(["nan", "nat", "none", ""]))
+    # Compact "25:17.2" style (minutes:seconds) — common in Android security CSVs
+    base_date = datetime.utcnow().replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    compact_pat = (
+        ss.str.match(r"^\d+:\d+(?:\.\d+)?$", na=False) & (ss.str.count(":") == 1)
+    ).fillna(False)
+    t = pd.Series(pd.NaT, index=ss.index, dtype="datetime64[ns]")
+    if compact_pat.any():
+
+        def _cell_compact(v):
+            p = _parse_mm_ss_or_hms_to_datetime(v, base_date)
+            return p if p is not None else pd.NaT
+
+        t.loc[compact_pat] = ss.loc[compact_pat].map(_cell_compact)
+    rest = (~compact_pat) & ss.notna()
+    if rest.any():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            tr = pd.to_datetime(ss.loc[rest], errors="coerce", utc=True)
+        if hasattr(tr.dt, "tz") and tr.dt.tz is not None:
+            tr = tr.dt.tz_convert(None)
+        t.loc[rest] = tr
+    if t.notna().sum() < n * 0.3:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                t2 = pd.to_datetime(ss, errors="coerce", format="mixed")
+            if t2.notna().sum() > t.notna().sum():
+                t = t2
+        except (TypeError, ValueError):
+            pass
+    return t
+
+
+def _find_time_column(columns: list[str]) -> str | None:
+    """Pick the best-matching datetime column name (first match wins)."""
+    candidates = (
+        "timestamp",
+        "time_created",
+        "timecreated",
+        "logged",
+        "datetime",
+        "event_time",
+        "date_time",
+        "ts",
+        "time",
+        "date",
+    )
+    lower = [str(c).strip().lower() for c in columns]
+    colset = set(lower)
+    for name in candidates:
+        if name in colset:
+            return lower[lower.index(name)]
+    for c in lower:
+        if "time" in c or "date" in c or c in ("ts", "logged"):
+            return c
+    return None
+
+
+def _read_android_csv(path: str | bytes) -> pd.DataFrame | None:
+    """
+    Read Android export; try comma / tab / semicolon / pipe and several encodings.
+    Wrong delimiter → one fat column → timestamp never parses → 0 rows after dropna.
+    """
+    encodings = ("utf-8-sig", "utf-8", "latin-1")
+    seps = (",", "\t", ";", "|")
+    best: pd.DataFrame | None = None
+    best_nc = 0
+
+    def _one_read(sep: str, enc: str) -> pd.DataFrame | None:
+        try:
+            if isinstance(path, bytes):
+                df = pd.read_csv(
+                    io.BytesIO(path), sep=sep, encoding=enc, low_memory=False
+                )
+            else:
+                df = pd.read_csv(path, sep=sep, encoding=enc, low_memory=False)
+        except Exception:
+            return None
+        if df is None or df.empty:
+            return None
+        return df
+
+    for enc in encodings:
+        for sep in seps:
+            df = _one_read(sep, enc)
+            if df is None:
+                continue
+            nc = len(df.columns)
+            if nc >= 2 and nc > best_nc:
+                best_nc = nc
+                best = df
+        try:
+            if isinstance(path, bytes):
+                sniffed = pd.read_csv(
+                    io.BytesIO(path),
+                    sep=None,
+                    engine="python",
+                    encoding=enc,
+                    low_memory=False,
+                )
+            else:
+                sniffed = pd.read_csv(
+                    path, sep=None, engine="python", encoding=enc, low_memory=False
+                )
+            if not sniffed.empty and len(sniffed.columns) > best_nc:
+                best_nc = len(sniffed.columns)
+                best = sniffed
+        except Exception:
+            pass
+
+    if best is None:
+        for enc in encodings:
+            try:
+                if isinstance(path, bytes):
+                    df = pd.read_csv(
+                        io.BytesIO(path), encoding=enc, low_memory=False
+                    )
+                else:
+                    df = pd.read_csv(path, encoding=enc, low_memory=False)
+            except Exception:
+                continue
+            if df is not None and not df.empty:
+                return df
+        return None
+
+    return best
+
+
+def load_android_csv_for_db(path: str | bytes) -> pd.DataFrame | None:
+    """
+    Load an Android CSV from a filesystem path or raw bytes, normalize headers, and
+    return a DataFrame ready for apply_threats. None on failure.
+    """
+    df = _read_android_csv(path)
+    if df is None:
         return None
 
     df.columns = [str(c).strip().lower() for c in df.columns]
 
+    ts_col = _find_time_column(list(df.columns))
     col_map = {
-        'logged': next((c for c in df.columns if c in ('timestamp', 'logged', 'time')), None),
+        'logged': ts_col,
         'level': next((c for c in df.columns if c == 'level'), None),
         'tag': next((c for c in df.columns if c == 'tag'), None),
         'package': next((c for c in df.columns if c in ('package_r', 'package_name', 'package')), None),
@@ -130,12 +326,17 @@ def load_android_csv_for_db(path: str) -> pd.DataFrame | None:
 
     ts_col = col_map.get('logged')
     if ts_col and ts_col in df.columns:
-        df['logged'] = pd.to_datetime(df[ts_col], errors='coerce')
+        df['logged'] = _parse_android_logged_column(df[ts_col])
     else:
         start_time = datetime.now() - timedelta(minutes=len(df))
         df['logged'] = [start_time + timedelta(minutes=i) for i in range(len(df))]
 
-    df = df.dropna(subset=['logged'])
+    kept = df.dropna(subset=['logged'])
+    if kept.empty and len(df) > 0:
+        base = datetime.utcnow().replace(microsecond=0) - timedelta(seconds=len(df))
+        df['logged'] = [base + timedelta(seconds=i) for i in range(len(df))]
+    else:
+        df = kept
 
     for posture in ('root', 'selinux', 'adb', 'mock', 'score'):
         if posture not in df.columns:
@@ -193,11 +394,16 @@ class TerminalCapture:
 
 
 def run_android_forensics_from_path(
-    csv_path: str, *, display_name: str | None = None, write_json: bool = True
+    csv_path: str | bytes,
+    *,
+    display_name: str | None = None,
+    write_json: bool = True,
 ) -> dict | None:
     W = 82
     capture = TerminalCapture()
-    shown_name = display_name or csv_path
+    shown_name = display_name or (
+        "<bytes>" if isinstance(csv_path, bytes) else csv_path
+    )
 
     with contextlib.redirect_stdout(capture):
         print("\n" + "="*W)
@@ -222,7 +428,9 @@ def run_android_forensics_from_path(
 
         df['computer'] = 'Android Device'
         df['User'] = 'MobileUser'
-        df['event ID'] = df['score'].astype(int)
+        df['event ID'] = (
+            pd.to_numeric(df['score'], errors="coerce").fillna(0).astype(np.int64)
+        )
         df['task Category'] = 'Android Behavioral'
 
         print("="*W)
@@ -418,20 +626,14 @@ def run_android_forensic_analysis(
     """In-memory Android CSV analysis; same export shape as disk-based CLI run."""
     if not return_dict:
         raise ValueError("Only return_dict=True is supported for API use.")
-    import tempfile
-
-    with tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False) as tf:
-        tf.write(file_bytes)
-        path = tf.name
-    try:
-        return run_android_forensics_from_path(
-            path, display_name=filename, write_json=False
-        )
-    finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+    out = run_android_forensics_from_path(
+        file_bytes, display_name=filename, write_json=False
+    )
+    if out is None:
+        return {
+            "error": "Android CSV could not be loaded or is empty after parsing timestamps.",
+        }
+    return out
 
 
 if __name__ == '__main__':

@@ -29,6 +29,25 @@ _PROJECT_REF = _proj_match.group(1) if _proj_match else ""
 logger = logging.getLogger(__name__)
 
 
+def normalize_storage_object_key(object_name: str) -> str:
+    """
+    Turn user input into the S3 object key Supabase expects.
+
+    Handles: leading slashes, accidental full public URLs, whitespace.
+    """
+    s = (object_name or "").strip()
+    if not s:
+        return s
+    lower = s.lower()
+    if "supabase.co" in lower and "/object/public/" in s:
+        after = s.split("/object/public/", 1)[1]
+        parts = after.split("/", 1)
+        if len(parts) == 2 and parts[0] == BUCKET_NAME:
+            return parts[1].lstrip("/")
+        return after.lstrip("/")
+    return s.lstrip("/")
+
+
 def _is_configured() -> bool:
     missing = []
     if not _S3_ENDPOINT:
@@ -49,13 +68,19 @@ def _is_configured() -> bool:
 
 def _s3():
     import boto3
+    from botocore.config import Config
 
+    # Supabase S3-compatible API expects path-style URLs and SigV4.
     return boto3.client(
         "s3",
         endpoint_url=_S3_ENDPOINT,
         aws_access_key_id=_ACCESS_KEY_ID,
         aws_secret_access_key=_SECRET_KEY,
         region_name=_REGION,
+        config=Config(
+            signature_version="s3v4",
+            s3={"addressing_style": "path"},
+        ),
     )
 
 
@@ -71,6 +96,7 @@ def upload_to_bucket(
     if not _is_configured():
         return None
     try:
+        object_name = normalize_storage_object_key(object_name)
         _s3().upload_file(
             Filename=file_path,
             Bucket=BUCKET_NAME,
@@ -84,6 +110,33 @@ def upload_to_bucket(
         return None
 
 
+def upload_bytes_to_bucket(
+    data: bytes,
+    object_name: str,
+    content_type: str = "application/octet-stream",
+) -> tuple[str | None, str | None]:
+    """
+    Upload raw bytes to the Supabase Storage bucket (S3).
+    Returns (object_key, None) on success, (None, error_message) on failure / skip.
+    """
+    if not _is_configured():
+        return None, "Storage not configured (set Bucket_Key, Bucket_Access_Key, Bucket_Secret_Key in ml_backend/.env)"
+    try:
+        object_name = normalize_storage_object_key(object_name)
+        _s3().put_object(
+            Bucket=BUCKET_NAME,
+            Key=object_name,
+            Body=data,
+            ContentType=content_type,
+        )
+        logger.info("Uploaded %d bytes → %s/%s", len(data), BUCKET_NAME, object_name)
+        return object_name, None
+    except Exception as e:
+        msg = f"{type(e).__name__}: {e}"
+        logger.warning("Supabase Storage bytes upload failed: %s", msg)
+        return None, msg
+
+
 def download_from_bucket(object_name: str, local_path: str) -> bool:
     """
     Download a file from the Supabase Storage bucket (S3) to local disk.
@@ -92,6 +145,7 @@ def download_from_bucket(object_name: str, local_path: str) -> bool:
     if not _is_configured():
         return False
     try:
+        object_name = normalize_storage_object_key(object_name)
         _s3().download_file(Bucket=BUCKET_NAME, Key=object_name, Filename=local_path)
         logger.info("Downloaded %s/%s → %s", BUCKET_NAME, object_name, local_path)
         return True
@@ -107,18 +161,27 @@ def download_from_bucket_bytes(object_name: str) -> bytes | None:
     """
     if not _is_configured():
         return None
+    key = normalize_storage_object_key(object_name)
+    if not key:
+        logger.warning("Supabase Storage download: empty object key after normalize")
+        return None
     try:
-        response = _s3().get_object(Bucket=BUCKET_NAME, Key=object_name)
+        response = _s3().get_object(Bucket=BUCKET_NAME, Key=key)
         file_bytes = response["Body"].read()
         logger.info(
             "Downloaded %s/%s (in-memory: %d bytes)",
             BUCKET_NAME,
-            object_name,
+            key,
             len(file_bytes),
         )
         return file_bytes
     except Exception as e:
-        logger.warning("Supabase Storage in-memory download failed: %s", e)
+        logger.warning(
+            "Supabase Storage in-memory download failed: bucket=%r key=%r err=%s",
+            BUCKET_NAME,
+            key,
+            e,
+        )
         return None
 
 
@@ -126,9 +189,10 @@ def get_public_url(object_name: str) -> str | None:
     """Public URL for an object in a public bucket."""
     if not _PROJECT_REF:
         return None
+    key = normalize_storage_object_key(object_name)
     return (
         f"https://{_PROJECT_REF}.supabase.co"
-        f"/storage/v1/object/public/{BUCKET_NAME}/{object_name}"
+        f"/storage/v1/object/public/{BUCKET_NAME}/{key}"
     )
 
 def empty_bucket() -> bool:

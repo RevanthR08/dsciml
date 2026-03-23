@@ -5,7 +5,6 @@ all data into the Neon PostgreSQL database.
 
 import json
 import os
-import tempfile
 import uuid
 from datetime import datetime
 
@@ -19,12 +18,10 @@ from db_models import (
     AnomalousEvent,
     AttackChain,
     ImpossibleTravel,
-    AndroidLog,
 )
 
 # PostgreSQL ~65535 bind params per statement
 _ANOMALOUS_EVENT_BATCH = 4000  # 8 cols × 4000 = 32k
-_ANDROID_LOG_BATCH = 400  # ~20 cols × 400
 
 
 def _parse_agreement(raw: str | None) -> float:
@@ -55,111 +52,17 @@ def _parse_dt(val):
     return t
 
 
-def persist_android_logs_from_csv(db: Session, scan_id, csv_path: str) -> int:
-    """
-    Load Android CSV, run the same rule engine as forensic_android, and bulk-insert
-    into android_logs (native columns + attack_category / is_anomalous).
-    """
-    from forensic_android import load_android_csv_for_db, apply_threats
-
-    if not csv_path or not os.path.isfile(csv_path):
-        return 0
-    if os.path.splitext(csv_path)[1].lower() != ".csv":
-        return 0
-
-    df = load_android_csv_for_db(csv_path)
-    if df is None or df.empty:
-        return 0
-
-    df = apply_threats(df)
-    suspicious_labels = {"suspicious", "anomalous", "attack", "malware"}
-
-    def _nz_int(row, key, default=0) -> int:
-        v = row.get(key)
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return default
-        n = _safe_int(v, default=None)
-        return n if n is not None else default
-
-    def _txt(row, key, default=None, maxlen=None):
-        v = row.get(key)
-        if v is None or (isinstance(v, float) and pd.isna(v)):
-            return default
-        s = str(v).strip()
-        if not s or s.lower() == "nan":
-            return default
-        if maxlen:
-            s = s[:maxlen]
-        return s
-
-    batch: list[dict] = []
-    total = 0
-
-    for _, row in df.iterrows():
-        ts = row.get("logged")
-        if ts is None or (isinstance(ts, float) and pd.isna(ts)):
-            continue
-        logged_at = pd.Timestamp(ts).to_pydatetime()
-
-        lbl = _txt(row, "label", "") or ""
-        lbl_l = lbl.lower()
-        cat = str(row.get("AttackCategory", "Normal"))
-        is_ano = (cat != "Normal") or (lbl_l in suspicious_labels)
-
-        batch.append(
-            {
-                "android_log_id": uuid.uuid4(),
-                "scan_id": scan_id,
-                "logged_at": logged_at,
-                "pid": _safe_int(row.get("pid")),
-                "tid": _safe_int(row.get("tid")),
-                "level": _txt(row, "level", None, 16),
-                "tag": _txt(row, "tag", None),
-                "package_r": _txt(row, "package_r", None),
-                "detail": _txt(row, "detail", None),
-                "score": _nz_int(row, "score", 0),
-                "penalty": _nz_int(row, "penalty", 0),
-                "root": _nz_int(row, "root", 0),
-                "selinux": _nz_int(row, "selinux", 0),
-                "adb": _nz_int(row, "adb", 0),
-                "devopts": _nz_int(row, "devOpts", _nz_int(row, "devopts", 0)),
-                "mock": _nz_int(row, "mock", 0),
-                "temp": _nz_int(row, "temp", 0),
-                "ram": _nz_int(row, "ram", 0),
-                "net": _txt(row, "net", None, 64),
-                "label": lbl_l or None,
-                "is_anomalous": is_ano,
-                "attack_category": cat,
-            }
-        )
-
-        if len(batch) >= _ANDROID_LOG_BATCH:
-            db.execute(insert(AndroidLog), batch)
-            db.flush()
-            total += len(batch)
-            batch.clear()
-
-    if batch:
-        db.execute(insert(AndroidLog), batch)
-        db.flush()
-        total += len(batch)
-
-    return total
-
-
 def persist_scan_report(
     db: Session,
     json_path: str | None = None,
     source_file_name: str | None = None,
     user_id: str | None = None,
     data_dict: dict | None = None,
-    source_csv_path: str | None = None,
-    android_raw_csv_bytes: bytes | None = None,
     log_platform: str | None = None,
 ) -> Scan:
     """
     Persist forensic analysis into scans, categories, events, chains, travels.
-    For Android, pass *android_raw_csv_bytes* or *source_csv_path* to populate android_logs.
+    Raw CSV rows are not duplicated into android_logs (source of truth remains Storage).
     """
     # Accept either dict or file path (backward compat)
     if data_dict is not None:
@@ -238,22 +141,6 @@ def persist_scan_report(
             chunk = event_rows[i : i + _ANOMALOUS_EVENT_BATCH]
             db.execute(insert(AnomalousEvent), chunk)
             db.flush()
-
-    plat = (platform or "").lower()
-    if plat == "android":
-        if source_csv_path:
-            persist_android_logs_from_csv(db, scan.scan_id, source_csv_path)
-        elif android_raw_csv_bytes:
-            with tempfile.NamedTemporaryFile(mode="wb", suffix=".csv", delete=False) as tf:
-                tf.write(android_raw_csv_bytes)
-                tmp = tf.name
-            try:
-                persist_android_logs_from_csv(db, scan.scan_id, tmp)
-            finally:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
 
     # ── 3. Attack Chains ─────────────────────────────────────────────────
     for chain in data.get("_attack_chains", []):

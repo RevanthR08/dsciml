@@ -1,6 +1,14 @@
 import base64
 import os
+import re
 import uuid as _uuid
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Uvicorn cwd is often not ml_backend; load .env next to this file so OP_ROUTER / DB URL resolve.
+# override=True: project .env wins over stale Windows user env (e.g. old LLM_API_KEY).
+load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
 
 from fastapi import (
     FastAPI,
@@ -30,7 +38,11 @@ from ai_intelligence import SecurityAI
 from forensic_report import run_forensic_analysis
 from forensic_android import run_android_forensic_analysis
 from migrations.databasecleanup import clean_database
-from storage_supabase import download_from_bucket_bytes, BUCKET_NAME
+from storage_supabase import (
+    download_from_bucket_bytes,
+    upload_bytes_to_bucket,
+    BUCKET_NAME,
+)
 from system_monitor import get_system_stats, stream_system_stats
 
 app = FastAPI(title="LogSentinal SOC Microservice", version="2.0")
@@ -43,7 +55,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-ai_engine = SecurityAI()
+_ai_engine: SecurityAI | None = None
+
+
+def _get_ai_engine() -> SecurityAI:
+    """Lazy init so the app can boot without LLM keys; AI routes fail until keys are set."""
+    global _ai_engine
+    if _ai_engine is None:
+        _ai_engine = SecurityAI()
+    return _ai_engine
+
 
 REPORTS_DIR = "detected_anomalies"
 ALLOWED_EXTENSIONS = {".csv", ".evtx"}
@@ -53,14 +74,21 @@ ALLOWED_EXTENSIONS = {".csv", ".evtx"}
 
 
 def _is_android_csv(file_bytes: bytes, filename: str) -> bool:
-    """Heuristic: Android export CSVs typically include score/root/ram in the header row."""
+    """Heuristic: Android CSV — strong match (score+root+ram) or typical columns in header."""
     if not filename.lower().endswith(".csv"):
         return False
     try:
-        head = file_bytes[:8192].decode("utf-8", errors="ignore").split("\n", 1)[0].lower()
+        head = file_bytes[:65536].decode("utf-8", errors="ignore").split("\n", 1)[0].lower()
     except Exception:
         return False
-    return "score" in head and "root" in head and "ram" in head
+    if "score" in head and "root" in head and "ram" in head:
+        return True
+    if "score" in head and "detail" in head and ("tag" in head or "package" in head):
+        return True
+    base = os.path.basename(filename or "").lower()
+    if "android" in base and "score" in head:
+        return True
+    return False
 
 
 def _resolve_scan(scan_id: str, db: Session) -> Scan:
@@ -82,17 +110,32 @@ def _resolve_scan(scan_id: str, db: Session) -> Scan:
     return scan
 
 
+def _analysis_export_summary(analysis_dict: dict) -> dict:
+    """Lightweight API payload when results are not persisted to PostgreSQL."""
+    meta = analysis_dict.get("_meta") or {}
+    categories = [k for k in analysis_dict if not str(k).startswith("_")]
+    return {
+        "scan_id": None,
+        "status": "completed",
+        "persisted_to_database": False,
+        "total_logs": meta.get("total_logs"),
+        "total_threats": meta.get("total_threats"),
+        "risk_score": meta.get("risk_score"),
+        "log_platform": meta.get("log_platform"),
+        "category_names": categories,
+    }
+
+
 def _run_forensic_pipeline(
-    file_bytes: bytes, filename: str, user_id: str = None
+    file_bytes: bytes,
+    filename: str,
+    user_id: str = None,
+    persist_db: bool = True,
 ) -> dict:
     """
-    Execute forensic analysis pipeline (fully in-memory, zero disk storage).
-    Returns analysis results dict or error info.
-
-    Args:
-        file_bytes: Raw file content as bytes (no disk writes)
-        filename: Original filename (for logging only)
-        user_id: User UUID owning this scan
+    Execute forensic analysis (in-memory). By default results are saved to PostgreSQL
+    (scan, categories, events, etc.). Set *persist_db* False to skip DB and return a
+    summary only (e.g. bucket-only testing).
     """
     is_android = _is_android_csv(file_bytes, filename)
     try:
@@ -112,9 +155,10 @@ def _run_forensic_pipeline(
     if isinstance(analysis_dict, dict) and analysis_dict.get("error"):
         return {"error": analysis_dict["error"]}
 
-    android_csv_bytes = file_bytes if is_android else None
+    if not persist_db:
+        print(f"✅ Analysis complete (no DB persist): {filename}")
+        return _analysis_export_summary(analysis_dict)
 
-    # Persist to database directly (no intermediate files)
     db = SessionLocal()
     try:
         scan = persist_scan_report(
@@ -123,13 +167,16 @@ def _run_forensic_pipeline(
             user_id=user_id,
             data_dict=analysis_dict,
             log_platform="android" if is_android else None,
-            android_raw_csv_bytes=android_csv_bytes,
         )
-        briefing = ai_engine.process_full_report_for_scan(
+        briefing = _get_ai_engine().process_full_report_for_scan(
             scan_id=str(scan.scan_id),
             user_id=str(scan.user_id) if scan.user_id else None,
         )
-        scan.ai_briefing = briefing
+        scan.ai_briefing = (
+            briefing
+            if briefing is not None and str(briefing).strip()
+            else "[AI briefing: empty or unavailable.]"
+        )
         db.commit()
         db.refresh(scan)
 
@@ -138,6 +185,7 @@ def _run_forensic_pipeline(
         return {
             "scan_id": str(scan.scan_id),
             "status": "completed",
+            "persisted_to_database": True,
             "total_logs": scan.total_logs,
             "total_threats": scan.total_threats,
             "risk_score": scan.risk_score,
@@ -172,17 +220,25 @@ def health(db: Session = Depends(get_db)):
 
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...), user_id: str = None):
+async def upload_file(
+    file: UploadFile = File(...),
+    user_id: str = None,
+    persist_db: bool = Query(
+        True,
+        description="If false, skip saving scan results to PostgreSQL (analysis + Storage upload still run when configured).",
+    ),
+):
     """
-    Upload a log file and automatically run forensic analysis.
+    Upload a log file and run forensic analysis.
     Accepts both .csv and .evtx (Windows Event Log) formats.
 
-    Processing is fully in-memory (zero local copy kept for scanning). Results are stored
-    in PostgreSQL. Android CSV uploads are detected from the header (score / root / ram)
-    and routed through the Android forensic pipeline.
+    By default: results are persisted to Postgres (scan, categories, events, …); CSV is also
+    uploaded to Storage when ``Bucket_*`` env is set. Raw CSV rows are not duplicated into
+    ``android_logs``. Use ``persist_db=false`` only to skip DB writes.
 
     Query parameters:
-      - user_id (required): UUID of the user who owns this scan
+      - user_id (required): UUID (used for Storage path ``logs/{user_id}/...``)
+      - persist_db (default true): set false to skip database persistence
     """
     # Validate userId is provided
     if not user_id:
@@ -207,18 +263,43 @@ async def upload_file(file: UploadFile = File(...), user_id: str = None):
             detail=f"Unsupported file type '{ext}'. Accepted: .csv, .evtx",
         )
 
-    # ✅ Read file into memory (no disk writes)
     file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Empty upload body (0 bytes).",
+                "hint": "In Postman form-data: set the row type to File, click the file cell, and re-pick the CSV until the warning icon is gone. "
+                "Or use curl: -F \"file=@/full/path/to/android_security_100k.csv\"",
+            },
+        )
 
-    # 🚀 Trigger analysis with in-memory bytes (no temp files)
+    safe_name = re.sub(r"[^\w.\-]", "_", os.path.basename(file.filename or "upload"))[
+        :180
+    ]
+    object_key = f"logs/{user_id}/{_uuid.uuid4().hex}_{safe_name}"
+    content_type = "text/csv" if ext == ".csv" else "application/octet-stream"
+    bucket_path, storage_error = upload_bytes_to_bucket(
+        file_bytes, object_key, content_type=content_type
+    )
+
     pipeline_result = _run_forensic_pipeline(
-        file_bytes=file_bytes, filename=file.filename, user_id=user_id
+        file_bytes=file_bytes,
+        filename=file.filename,
+        user_id=user_id,
+        persist_db=persist_db,
     )
 
     return {
         "message": f"Uploaded {file.filename} and analysis completed",
         "file_type": ext[1:].upper(),
-        "processing": "in-memory (no local storage)",
+        "bytes_received": len(file_bytes),
+        "persist_db": persist_db,
+        "processing": "in-memory analysis; CSV copy in Storage when configured",
+        "bucket": BUCKET_NAME,
+        "bucket_path": bucket_path,
+        "storage_ok": bucket_path is not None,
+        "storage_error": storage_error,
         "analysis": pipeline_result,
     }
 
@@ -235,19 +316,27 @@ def create_scan(
 
     Body options (S3 priority):
       {
-        "bucket_path": "logs/System.csv",      ← Download and scan from S3 bucket
-        "user_id": "uuid-string",               ← Required: UUID of the user who owns this scan
-        "background": false                     ← Optional: Run in background (default: false)
+        "bucket_path": "logs/System.csv",
+        "user_id": "uuid-string",
+        "background": false,
+        "persist_db": true
       }
       OR
       {
-        "file_content": "<base64-encoded-bytes>",  ← File bytes (base64)
-        "filename": "logs.csv",                     ← Filename (to detect format)
-        "user_id": "uuid-string",                   ← Required: UUID of the user who owns this scan
-        "background": false                         ← Optional: Run in background (default: false)
+        "file_content": "<base64>",
+        "filename": "logs.csv",
+        "user_id": "uuid-string",
+        "background": false,
+        "persist_db": true
       }
+
+    Default is to persist scan results to Postgres. Set persist_db false to skip DB only.
     """
     body = body or {}
+
+    persist_db = body.get("persist_db", True)
+    if isinstance(persist_db, str):
+        persist_db = persist_db.strip().lower() in ("1", "true", "yes")
 
     # Validate userId is provided
     user_id = body.get("user_id")
@@ -272,13 +361,19 @@ def create_scan(
     if body.get("bucket_path"):
         # Download from S3 into memory (zero disk I/O)
         object_name = body["bucket_path"]
-        filename = os.path.basename(object_name)
+        filename = os.path.basename(object_name.strip().rstrip("/"))
 
         file_bytes = download_from_bucket_bytes(object_name)
         if file_bytes is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"Could not download '{object_name}' from S3 bucket '{BUCKET_NAME}'.",
+                detail={
+                    "message": "Object not found or storage misconfigured.",
+                    "hint": "Use the exact `bucket_path` string returned by POST /upload (e.g. logs/<user_id>/<uuid>_file.csv). "
+                    "Do not use the Dashboard-only path if it differs; Bucket_Name in .env must match your Supabase bucket id.",
+                    "attempted_key": object_name,
+                    "bucket": BUCKET_NAME,
+                },
             )
     elif body.get("file_content") and body.get("filename"):
         try:
@@ -304,22 +399,32 @@ def create_scan(
             file_bytes=file_bytes,
             filename=filename,
             user_id=user_id,
+            persist_db=persist_db,
+        )
+        msg = (
+            "Pipeline running in background. Poll GET /scans/{scan_id} when persist_db is true."
+            if persist_db
+            else "Pipeline running in background (persist_db=false; no scan row — check server logs)."
         )
         return {
             "status": "started",
             "analyzing": filename,
             "user_id": user_id,
-            "message": "Pipeline running in background. Poll GET /scans/{scan_id} to check status.",
+            "persist_db": persist_db,
+            "message": msg,
         }
     else:
-        # Run synchronously and return results immediately
         result = _run_forensic_pipeline(
-            file_bytes=file_bytes, filename=filename, user_id=user_id
+            file_bytes=file_bytes,
+            filename=filename,
+            user_id=user_id,
+            persist_db=persist_db,
         )
         return {
             "status": "completed",
             "analyzing": filename,
             "user_id": user_id,
+            "persist_db": persist_db,
             **result,
         }
 
@@ -476,11 +581,15 @@ def get_scan_summary(scan_id: str, db: Session = Depends(get_db)):
     scan = _resolve_scan(scan_id, db)
 
     if not scan.ai_briefing:
-        briefing = ai_engine.process_full_report_for_scan(
+        briefing = _get_ai_engine().process_full_report_for_scan(
             scan_id=str(scan.scan_id),
             user_id=str(scan.user_id) if scan.user_id else None,
         )
-        scan.ai_briefing = briefing
+        scan.ai_briefing = (
+            briefing
+            if briefing is not None and str(briefing).strip()
+            else "[AI briefing: empty or unavailable.]"
+        )
         db.commit()
 
     return {
@@ -533,7 +642,7 @@ def ask_question(body: dict = None, db: Session = Depends(get_db)):
         )
 
     # Answer is based on DB data, not local files
-    answer = ai_engine.answer_question(question, scan_id=scan_id)
+    answer = _get_ai_engine().answer_question(question, scan_id=scan_id)
     return {
         "scan_id": str(scan.scan_id),
         "question": question,
@@ -571,13 +680,13 @@ def dashboard_stats(db: Session = Depends(get_db)):
 @app.post("/admin/cleanup")
 def wipe_database():
     """
-    Truncates all rows in application tables (schema preserved) and empties the storage bucket.
+    Truncates application tables except ``users`` (schema preserved) and empties the storage bucket.
     """
     try:
         clean_database()
         return {
             "status": "success",
-            "message": "All table data cleared (schema unchanged); bucket empty attempted.",
+            "message": "Application data cleared (users preserved, schema unchanged); bucket empty attempted.",
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
