@@ -23,8 +23,9 @@ class UUIDEncoder(json.JSONEncoder):
         return super().default(obj)
 
 # Load API Keys
-load_dotenv()
+load_dotenv(override=True)
 GROQ_KEY = os.getenv("GROQ_API_KEY")
+print(os.getenv("GROQ_API_KEY"))
 GEMINI_KEY = os.getenv("GEMINI_API_KEY")
 DEFAULT_USER_ID = "356721c8-1559-4c00-9aec-8be06d861028"
 MAX_TOOL_CALLS = 5
@@ -36,16 +37,16 @@ class SecurityAI:
     def __init__(self):
         print(f"🤖 Initializing AI in {AI_MODE} mode...")
         if AI_MODE == 'GROQ':
-            # Groq via OpenAI-compatible client
+            # Groq via OpenAI-compatible client            
             self.client = OpenAI(
                 api_key=GROQ_KEY,
-                base_url="https://api.groq.com/openai/v1"
+                base_url="https://openrouter.ai/api/v1"
             )
-            self.model_name = "llama-3.3-70b-versatile"  # Groq's Llama 70B model
+            self.model_name = "stepfun/step-3.5-flash:free"  # Groq's Llama 70B model
         else:
             # Fallback to Gemini if Groq not available
             warnings.filterwarnings('ignore', message='.*google.generativeai.*')
-            genai = importlib.import_module("google.generativeai")
+            genai = importlib.import_module("google.generativeai")            
             genai.configure(api_key=GEMINI_KEY)
             self.model = genai.GenerativeModel('gemini-1.5-flash-latest')
             self.client = None
@@ -204,7 +205,6 @@ class SecurityAI:
                 response = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=messages,
-                    max_tokens=2000
                 )
                 
                 # Extract final text response

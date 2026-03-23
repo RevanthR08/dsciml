@@ -49,19 +49,35 @@ ALLOWED_EXTENSIONS = {".csv", ".evtx"}
 # ━━━ Helpers ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def _resolve_scan(scan_id: str, db: Session) -> Scan:
+def _resolve_scan(user_id: str, scan_id: str, db: Session) -> Scan:
     """
     Accept a scan_id as UUID string **or** the literal 'latest'.
+    Filters by both user_id and scan_id to ensure user can only access their own scans.
     Returns the Scan ORM object or raises 404.
     """
+    # Validate user_id is a valid UUID
+    try:
+        uid = _uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid user_id: {user_id}")
+
     if scan_id == "latest":
-        scan = db.query(Scan).order_by(desc(Scan.generated_at)).first()
+        scan = (
+            db.query(Scan)
+            .filter(Scan.user_id == uid)
+            .order_by(desc(Scan.generated_at))
+            .first()
+        )
     else:
         try:
             sid = _uuid.UUID(scan_id)
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid scan_id: {scan_id}")
-        scan = db.query(Scan).filter(Scan.scan_id == sid).first()
+        scan = (
+            db.query(Scan)
+            .filter(Scan.scan_id == sid, Scan.user_id == uid)
+            .first()
+        )
 
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found.")
@@ -200,37 +216,34 @@ async def upload_file(file: UploadFile = File(...), user_id: str = None):
 # ━━━ Scans ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@app.post("/scans")
+@app.post("/users/{user_id}/scans")
 def create_scan(
-    background_tasks: BackgroundTasks, body: dict = None, db: Session = Depends(get_db)
+    user_id: str,
+    background_tasks: BackgroundTasks,
+    body: dict = None,
+    db: Session = Depends(get_db),
 ):
     """
-    Trigger a forensic scan (in-memory processing, zero local storage).
+    Trigger a forensic scan for a specific user (in-memory processing, zero local storage).
+
+    Path Parameters:
+      - user_id: UUID of the user who owns this scan
 
     Body options (S3 priority):
       {
         "bucket_path": "logs/System.csv",      ← Download and scan from S3 bucket
-        "user_id": "uuid-string",               ← Required: UUID of the user who owns this scan
         "background": false                     ← Optional: Run in background (default: false)
       }
       OR
       {
         "file_content": "<base64-encoded-bytes>",  ← File bytes (base64)
         "filename": "logs.csv",                     ← Filename (to detect format)
-        "user_id": "uuid-string",                   ← Required: UUID of the user who owns this scan
         "background": false                         ← Optional: Run in background (default: false)
       }
     """
     body = body or {}
 
-    # Validate userId is provided
-    user_id = body.get("user_id")
-    if not user_id:
-        raise HTTPException(
-            status_code=400, detail="user_id is required in request body (UUID string)"
-        )
-
-    # Validate it's a valid UUID
+    # Validate user_id is provided and is a valid UUID
     try:
         _uuid.UUID(user_id)
     except ValueError:
@@ -286,7 +299,7 @@ def create_scan(
             "status": "started",
             "analyzing": filename,
             "user_id": user_id,
-            "message": "Pipeline running in background. Poll GET /scans/{scan_id} to check status.",
+            "message": "Pipeline running in background. Poll GET /users/{}/scans/{{scan_id}} to check status.".format(user_id),
         }
     else:
         # Run synchronously and return results immediately
@@ -301,16 +314,28 @@ def create_scan(
         }
 
 
-@app.get("/scans")
+@app.get("/users/{user_id}/scans")
 def list_scans(
+    user_id: str,
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """List all scans, newest first."""
-    total = db.query(func.count(Scan.scan_id)).scalar()
+    """List all scans for a specific user, newest first."""
+    # Validate user_id is a valid UUID
+    try:
+        uid = _uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid user_id: {user_id}")
+
+    total = (
+        db.query(func.count(Scan.scan_id))
+        .filter(Scan.user_id == uid)
+        .scalar()
+    )
     scans = (
         db.query(Scan)
+        .filter(Scan.user_id == uid)
         .order_by(desc(Scan.generated_at))
         .offset(offset)
         .limit(limit)
@@ -324,13 +349,14 @@ def list_scans(
     }
 
 
-@app.get("/scans/{scan_id}")
-def get_scan(scan_id: str, db: Session = Depends(get_db)):
+@app.get("/users/{user_id}/scans/{scan_id}")
+def get_scan(user_id: str, scan_id: str, db: Session = Depends(get_db)):
     """
     Get a scan by its UUID or use 'latest' for the most recent one.
     Returns scan metadata, category summary, chain count, and travel count.
+    Only returns scans owned by the specified user.
     """
-    scan = _resolve_scan(scan_id, db)
+    scan = _resolve_scan(user_id, scan_id, db)
 
     categories = (
         db.query(AnomalyCategory)
@@ -358,10 +384,10 @@ def get_scan(scan_id: str, db: Session = Depends(get_db)):
     }
 
 
-@app.delete("/scans/{scan_id}")
-def delete_scan(scan_id: str, db: Session = Depends(get_db)):
-    """Delete a scan and all its cascaded data."""
-    scan = _resolve_scan(scan_id, db)
+@app.delete("/users/{user_id}/scans/{scan_id}")
+def delete_scan(user_id: str, scan_id: str, db: Session = Depends(get_db)):
+    """Delete a scan and all its cascaded data. Only deletes scans owned by the specified user."""
+    scan = _resolve_scan(user_id, scan_id, db)
     db.delete(scan)
     db.commit()
     return {"deleted": str(scan.scan_id)}
@@ -370,10 +396,10 @@ def delete_scan(scan_id: str, db: Session = Depends(get_db)):
 # ━━━ Scan Sub-resources ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@app.get("/scans/{scan_id}/categories")
-def get_scan_categories(scan_id: str, db: Session = Depends(get_db)):
-    """Anomaly categories for a scan, ranked by risk."""
-    scan = _resolve_scan(scan_id, db)
+@app.get("/users/{user_id}/scans/{scan_id}/categories")
+def get_scan_categories(user_id: str, scan_id: str, db: Session = Depends(get_db)):
+    """Anomaly categories for a scan, ranked by risk. Only returns data for scans owned by the user."""
+    scan = _resolve_scan(user_id, scan_id, db)
     categories = (
         db.query(AnomalyCategory)
         .filter(AnomalyCategory.scan_id == scan.scan_id)
@@ -383,8 +409,9 @@ def get_scan_categories(scan_id: str, db: Session = Depends(get_db)):
     return {"count": len(categories), "categories": [c.to_dict() for c in categories]}
 
 
-@app.get("/scans/{scan_id}/events")
+@app.get("/users/{user_id}/scans/{scan_id}/events")
 def get_scan_events(
+    user_id: str,
     scan_id: str,
     category: str = Query(None, description="Filter by attack category name"),
     computer: str = Query(None, description="Filter by computer name"),
@@ -393,8 +420,8 @@ def get_scan_events(
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ):
-    """Paginated anomalous events for a scan, with optional filters."""
-    scan = _resolve_scan(scan_id, db)
+    """Paginated anomalous events for a scan, with optional filters. Only returns data for scans owned by the user."""
+    scan = _resolve_scan(user_id, scan_id, db)
 
     query = (
         db.query(AnomalousEvent, AnomalyCategory.category_name)
@@ -418,18 +445,18 @@ def get_scan_events(
     return {"total": total, "limit": limit, "offset": offset, "events": events}
 
 
-@app.get("/scans/{scan_id}/chains")
-def get_scan_chains(scan_id: str, db: Session = Depends(get_db)):
-    """Attack chains detected in a scan."""
-    scan = _resolve_scan(scan_id, db)
+@app.get("/users/{user_id}/scans/{scan_id}/chains")
+def get_scan_chains(user_id: str, scan_id: str, db: Session = Depends(get_db)):
+    """Attack chains detected in a scan. Only returns data for scans owned by the user."""
+    scan = _resolve_scan(user_id, scan_id, db)
     chains = db.query(AttackChain).filter(AttackChain.scan_id == scan.scan_id).all()
     return {"count": len(chains), "chains": [c.to_dict() for c in chains]}
 
 
-@app.get("/scans/{scan_id}/travels")
-def get_scan_travels(scan_id: str, db: Session = Depends(get_db)):
-    """Impossible travel detections for a scan."""
-    scan = _resolve_scan(scan_id, db)
+@app.get("/users/{user_id}/scans/{scan_id}/travels")
+def get_scan_travels(user_id: str, scan_id: str, db: Session = Depends(get_db)):
+    """Impossible travel detections for a scan. Only returns data for scans owned by the user."""
+    scan = _resolve_scan(user_id, scan_id, db)
     travels = (
         db.query(ImpossibleTravel)
         .filter(ImpossibleTravel.scan_id == scan.scan_id)
@@ -441,10 +468,10 @@ def get_scan_travels(scan_id: str, db: Session = Depends(get_db)):
 # ━━━ AI / Intelligence ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-@app.get("/scans/{scan_id}/summary")
-def get_scan_summary(scan_id: str, db: Session = Depends(get_db)):
-    """AI executive briefing for a scan."""
-    scan = _resolve_scan(scan_id, db)
+@app.get("/users/{user_id}/scans/{scan_id}/summary")
+def get_scan_summary(user_id: str, scan_id: str, db: Session = Depends(get_db)):
+    """AI executive briefing for a scan. Only returns data for scans owned by the user."""
+    scan = _resolve_scan(user_id, scan_id, db)
 
     if not scan.ai_briefing:
         briefing = ai_engine.process_full_report()
