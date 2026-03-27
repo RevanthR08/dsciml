@@ -15,7 +15,7 @@ topk = 5
 train_ratio = 0.2
 window_size = 10
 epoches = 2
-num_workers = 2
+num_workers = 5
 device = 0 
 
 struct_log = '../data/HDFS/HDFS_100k.log_structured.csv' # The structured log file
