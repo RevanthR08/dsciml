@@ -1,6 +1,7 @@
 import base64
 import os
 import re
+import tempfile
 import uuid as _uuid
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from fastapi import (
     Depends,
     WebSocket,
 )
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, text
@@ -168,22 +171,12 @@ def _run_forensic_pipeline(
             data_dict=analysis_dict,
             log_platform="android" if is_android else None,
         )
-        briefing = _get_ai_engine().process_full_report_for_scan(
-            scan_id=str(scan.scan_id),
-            user_id=str(scan.user_id) if scan.user_id else None,
-        )
-        scan.ai_briefing = (
-            briefing
-            if briefing is not None and str(briefing).strip()
-            else "[AI briefing: empty or unavailable.]"
-        )
         db.commit()
         db.refresh(scan)
-
-        print(f"✅ Analysis complete (in-memory processing): {filename}")
-
-        return {
-            "scan_id": str(scan.scan_id),
+        scan_id = scan.scan_id
+        scan_user = str(scan.user_id) if scan.user_id else None
+        response_payload = {
+            "scan_id": str(scan_id),
             "status": "completed",
             "persisted_to_database": True,
             "total_logs": scan.total_logs,
@@ -195,6 +188,38 @@ def _run_forensic_pipeline(
         return {"error": str(e)}
     finally:
         db.close()
+
+    # AI briefing can take many minutes (rate limits, many categories). Holding one DB
+    # session open that whole time often hits Supabase pooler idle/timeout — commit above,
+    # then persist briefing in a fresh session.
+    try:
+        briefing = _get_ai_engine().process_full_report_for_scan(
+            scan_id=str(scan_id),
+            user_id=scan_user,
+        )
+    except Exception as e:
+        briefing = f"[AI briefing failed: {e}]"
+
+    db2 = SessionLocal()
+    try:
+        row = db2.query(Scan).filter(Scan.scan_id == scan_id).first()
+        if row:
+            row.ai_briefing = (
+                briefing
+                if briefing is not None and str(briefing).strip()
+                else "[AI briefing: empty or unavailable.]"
+            )
+            db2.commit()
+            db2.refresh(row)
+        print(f"✅ Analysis complete (in-memory processing): {filename}")
+    except Exception as e:
+        db2.rollback()
+        response_payload["ai_briefing_persist_error"] = str(e)
+        print(f"⚠️ Scan persisted but ai_briefing update failed: {e}")
+    finally:
+        db2.close()
+
+    return response_payload
 
 
 # ━━━ Health ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -404,7 +429,7 @@ def create_scan(
         msg = (
             "Pipeline running in background. Poll GET /scans/{scan_id} when persist_db is true."
             if persist_db
-            else "Pipeline running in background (persist_db=false; no scan row — check server logs)."
+            else "Pipeline running in background (persist_db=false; no_scan_row — check server logs)."
         )
         return {
             "status": "started",
@@ -575,6 +600,207 @@ def get_scan_travels(scan_id: str, db: Session = Depends(get_db)):
 # ━━━ AI / Intelligence ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+def _parse_pdf_executive_sections(text: str | None) -> dict[str, str]:
+    """
+    Split dashboard executive briefing into sections (headings match ai_intelligence prompt:
+    Scan overview, Timeline, Categories, Risk, Next step).
+    """
+    if not text or not str(text).strip():
+        return {}
+    title_to_key = {
+        "scan overview": "scan_overview",
+        "timeline": "timeline",
+        "categories": "categories",
+        "risk": "risk",
+        "next step": "next_step",
+    }
+    lines = text.splitlines()
+    current_key: str | None = None
+    buckets: dict[str, list[str]] = {v: [] for v in title_to_key.values()}
+    for line in lines:
+        stripped = line.strip()
+        low = stripped.replace("*", "").strip().lower()
+        if low in title_to_key and len(stripped) < 64:
+            current_key = title_to_key[low]
+            continue
+        if current_key:
+            buckets[current_key].append(line)
+    return {k: "\n".join(v).strip() for k, v in buckets.items() if v}
+
+
+def _int_to_roman(n: int) -> str:
+    if n <= 0:
+        return ""
+    vals = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ]
+    num = n
+    out: list[str] = []
+    for v, s in vals:
+        while num >= v:
+            out.append(s)
+            num -= v
+    return "".join(out)
+
+
+def _category_severity_label(risk_score: int | None) -> str:
+    if risk_score is None:
+        return "MEDIUM"
+    if risk_score >= 85:
+        return "CRITICAL"
+    if risk_score >= 55:
+        return "HIGH"
+    if risk_score >= 25:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _top_windows_event_id_for_category(db: Session, category_id) -> str | None:
+    cnt = func.count().label("cnt")
+    r = (
+        db.query(AnomalousEvent.windows_event_id, cnt)
+        .filter(
+            AnomalousEvent.category_id == category_id,
+            AnomalousEvent.windows_event_id.isnot(None),
+        )
+        .group_by(AnomalousEvent.windows_event_id)
+        .order_by(desc(cnt))
+        .first()
+    )
+    return str(r[0]) if r else None
+
+
+def _affected_hosts_for_category(db: Session, category_id, limit: int = 16) -> str:
+    rows = (
+        db.query(AnomalousEvent.computer)
+        .filter(AnomalousEvent.category_id == category_id)
+        .distinct()
+        .limit(limit)
+        .all()
+    )
+    return ", ".join(r[0] for r in rows if r[0]) or "—"
+
+
+def _sample_event_log_rows_for_category(
+    db: Session, category_id, limit: int = 10
+) -> list[list[str]]:
+    evs = (
+        db.query(AnomalousEvent)
+        .filter(AnomalousEvent.category_id == category_id)
+        .order_by(AnomalousEvent.time_logged)
+        .limit(limit)
+        .all()
+    )
+    rows: list[list[str]] = []
+    for e in evs:
+        ts = (
+            e.time_logged.strftime("%Y-%m-%d %H:%M:%S") if e.time_logged else "—"
+        )
+        eid = str(e.windows_event_id) if e.windows_event_id is not None else "—"
+        det = (e.task_category or "—")[:120]
+        rows.append([ts, e.computer or "—", e.user_account or "—", eid, det])
+    return rows
+
+
+def _build_pdf_parallel_payload(
+    db: Session, scan: Scan, briefing_text: str, sections: dict, scan_facts: dict
+) -> dict:
+    """
+    JSON shaped like pdf_forensic_report sections I + VI…: executive block and
+    per-category detailed findings with real ai_summary instead of TechCorp mocks.
+    """
+    cats = (
+        db.query(AnomalyCategory)
+        .filter(
+            AnomalyCategory.scan_id == scan.scan_id,
+            AnomalyCategory.category_name != "Normal",
+        )
+        .order_by(AnomalyCategory.event_count.desc())
+        .all()
+    )
+    win = scan_facts.get("anomaly_log_window") or {}
+    fn = scan_facts.get("file_name") or scan.file_name or "upload"
+    tot_logs = scan_facts.get("total_logs", scan.total_logs)
+    tot_th = scan_facts.get("total_threats", scan.total_threats)
+    rsk = scan_facts.get("risk_score", scan.risk_score)
+    intro_paragraphs = [
+        (
+            f"Forensic analysis for {fn}. Ingested {tot_logs:,} log lines; "
+            f"{tot_th} pipeline-classified threats; aggregate risk index {rsk}."
+        ),
+        (
+            f"Stored anomalous event window: {win.get('first_observed') or 'n/a'} → "
+            f"{win.get('last_observed') or 'n/a'} "
+            f"({win.get('stored_anomaly_event_rows', 0):,} anomaly rows, non-Normal categories)."
+        ),
+    ]
+    key_findings = []
+    for i, cat in enumerate(cats, start=1):
+        line = (cat.ai_summary or "").strip().replace("\r\n", "\n")
+        first_line = line.split("\n")[0].strip() if line else ""
+        blob = (
+            first_line[:600]
+            if first_line
+            else (
+                f"{cat.category_name}: {cat.event_count} events; "
+                f"tactic {cat.tactic or '—'}; MITRE {cat.mitre_id or '—'}."
+            )
+        )
+        key_findings.append({"label": f"Finding {i}", "text": blob})
+
+    detailed = []
+    for idx, cat in enumerate(cats):
+        roman = _int_to_roman(6 + idx)
+        tid = cat.mitre_id or "—"
+        tactic = cat.tactic or "—"
+        hosts = _affected_hosts_for_category(db, cat.category_id)
+        top_eid = _top_windows_event_id_for_category(db, cat.category_id) or "—"
+        detailed.append(
+            {
+                "section": roman,
+                "section_index": 6 + idx,
+                "title": f"{cat.category_name} — Detailed Analysis",
+                "category_id": str(cat.category_id),
+                "category_name": cat.category_name,
+                "primary_windows_event_id": top_eid,
+                "event_count": cat.event_count,
+                "category_risk_score": cat.risk_score,
+                "tactic": tactic,
+                "mitre_id": tid,
+                "affected_hosts": hosts,
+                "severity": _category_severity_label(cat.risk_score),
+                "forensic_analysis": (cat.ai_summary or "").strip() or None,
+                "event_log_samples": _sample_event_log_rows_for_category(
+                    db, cat.category_id
+                ),
+            }
+        )
+
+    return {
+        "executive_summary": {
+            "section": "I",
+            "title": "EXECUTIVE SUMMARY",
+            "intro_paragraphs": intro_paragraphs,
+            "dashboard_briefing_plain_text": briefing_text,
+            "dashboard_briefing_sections": sections,
+            "key_findings": key_findings,
+        },
+        "detailed_findings": detailed,
+    }
+
+
 @app.get("/scans/{scan_id}/summary")
 def get_scan_summary(scan_id: str, db: Session = Depends(get_db)):
     """AI executive briefing for a scan."""
@@ -598,6 +824,122 @@ def get_scan_summary(scan_id: str, db: Session = Depends(get_db)):
         "scan_meta": scan.to_dict(),
         "executive_briefing": scan.ai_briefing,
     }
+
+
+@app.get("/scans/{scan_id}/briefing-formatted")
+def get_briefing_formatted(
+    scan_id: str,
+    refresh: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    """
+    Dashboard briefing plus a pdf_forensic_report-shaped payload (Section I executive + VI…
+    detailed blocks) using DB fields and per-category ai_summary instead of mock TechCorp text.
+    """
+    scan = _resolve_scan(scan_id, db)
+    ai = _get_ai_engine()
+
+    def _usable_briefing(s: str | None) -> bool:
+        return bool(s and str(s).strip() and "Scan overview" in s)
+
+    text = (scan.ai_briefing or "").strip()
+
+    if refresh:
+        new_t = ai.regenerate_executive_briefing_from_db(str(scan.scan_id))
+        if _usable_briefing(new_t):
+            scan.ai_briefing = new_t
+            db.commit()
+            db.refresh(scan)
+            text = new_t
+        elif "No category AI summaries" in (new_t or "") or "No anomaly categories" in (
+            new_t or ""
+        ):
+            full = ai.process_full_report_for_scan(
+                scan_id=str(scan.scan_id),
+                user_id=str(scan.user_id) if scan.user_id else None,
+            )
+            if full and str(full).strip():
+                scan.ai_briefing = full
+                db.commit()
+                db.refresh(scan)
+            text = (scan.ai_briefing or full or new_t or "").strip()
+        else:
+            text = (new_t or text).strip()
+    elif not text:
+        new_t = ai.regenerate_executive_briefing_from_db(str(scan.scan_id))
+        if _usable_briefing(new_t):
+            scan.ai_briefing = new_t
+            db.commit()
+            db.refresh(scan)
+            text = new_t
+        else:
+            full = ai.process_full_report_for_scan(
+                scan_id=str(scan.scan_id),
+                user_id=str(scan.user_id) if scan.user_id else None,
+            )
+            scan.ai_briefing = (
+                full
+                if full is not None and str(full).strip()
+                else "[AI briefing: empty or unavailable.]"
+            )
+            db.commit()
+            db.refresh(scan)
+            text = scan.ai_briefing or ""
+
+    facts = ai._scan_facts_for_briefing(scan.scan_id)
+    sections = _parse_pdf_executive_sections(text)
+    pdf_parallel = _build_pdf_parallel_payload(db, scan, text, sections, facts)
+
+    return {
+        "scan_id": str(scan.scan_id),
+        "briefing_format": "pdf_executive_dashboard_v1",
+        "generated_at": scan.generated_at.isoformat() if scan.generated_at else None,
+        "plain_text": text,
+        "sections": sections,
+        "scan_facts": facts,
+        "pdf_parallel": pdf_parallel,
+    }
+
+
+@app.get("/scans/{scan_id}/pdf")
+def download_scan_pdf(scan_id: str, db: Session = Depends(get_db)):
+    """Generate and download a database-backed forensic PDF for this scan."""
+    from pdf_forensic_report import build_scan_pdf
+
+    scan = _resolve_scan(scan_id, db)
+    fd, path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    try:
+        out = build_scan_pdf(path, str(scan.scan_id))
+        if not out:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+            raise HTTPException(
+                status_code=404, detail="Scan could not be exported (missing from database)."
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=500, detail=f"PDF generation failed: {e}"
+        ) from e
+
+    safe = re.sub(r"[^\w.\-]", "_", scan.file_name or "scan")[:120]
+    filename = f"forensic_{safe}_{str(scan.scan_id)[:8]}.pdf"
+    return FileResponse(
+        path,
+        filename=filename,
+        media_type="application/pdf",
+        background=BackgroundTask(
+            lambda p=path: os.remove(p) if os.path.exists(p) else None
+        ),
+    )
 
 
 @app.post("/ask")
@@ -680,16 +1022,29 @@ def dashboard_stats(db: Session = Depends(get_db)):
 @app.post("/admin/cleanup")
 def wipe_database():
     """
-    Truncates application tables except ``users`` (schema preserved) and empties the storage bucket.
+    Truncates application tables except ``users`` (schema preserved).
+    Empties the Supabase Storage bucket when ``Bucket_Key`` + S3 access keys are set; otherwise
+    skips storage (same behavior as upload when storage is not configured).
     """
     try:
-        clean_database()
+        result = clean_database()
+        storage = result.get("storage") or {}
+        if storage.get("configured") and not storage.get("success"):
+            return {
+                "status": "partial",
+                "message": "Database truncated, but storage delete failed (see storage.message).",
+                "database": result.get("database"),
+                "storage": storage,
+            }
         return {
             "status": "success",
-            "message": "Application data cleared (users preserved, schema unchanged); bucket empty attempted.",
+            "message": "Application data cleared (users preserved). "
+            + (storage.get("message") or ""),
+            "database": result.get("database"),
+            "storage": storage,
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 # ━━━ System Monitor ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

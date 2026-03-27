@@ -1,18 +1,12 @@
 import os
 import json
-import glob
 import time
-import importlib
 import threading
 from pathlib import Path
-from typing import Mapping
 
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor
-import hashlib
-import warnings
 from sqlalchemy import text
-from openai import OpenAI
 import uuid
 
 from database import SessionLocal
@@ -56,71 +50,73 @@ def _env_url(name: str) -> str | None:
     return v.rstrip("/") if v else None
 
 
-def _completion_text(response) -> str:
-    """
-    Chat completions often return message.content=None (empty or tool-only).
-    Never return None — Postgres Text columns would store NULL and look 'broken' in UI.
-    """
+def _env_float(name: str, default: float) -> float:
+    v = _env_str(name)
+    if v is None:
+        return default
     try:
-        msg = response.choices[0].message
-        text = getattr(msg, "content", None)
-        if text is not None and str(text).strip():
-            return str(text)
-    except (IndexError, AttributeError, TypeError):
-        pass
-    return "[Model returned no text for this request.]"
+        return float(v)
+    except ValueError:
+        return default
+
+
+def _rate_limit_backoff_seconds(attempt: int) -> int:
+    """
+    Sleep duration after 429 / rate / quota errors. attempt is 0-based.
+    Defaults: 15s, 30s, 45s (cap 60). Override via LLM_RATE_LIMIT_STEP_SEC / LLM_RATE_LIMIT_CAP_SEC.
+    """
+    step = max(5, int(_env_float("LLM_RATE_LIMIT_STEP_SEC", 15)))
+    cap = max(step, int(_env_float("LLM_RATE_LIMIT_CAP_SEC", 60)))
+    return min(cap, step * (attempt + 1))
+
+
+def _canonical_gemini_model_id(raw: str | None) -> str:
+    """
+    Map common mistakes to real Gemini API model codes (generateContent on AI Studio).
+    Invalid ids produce 404 NOT_FOUND, not rate limits.
+    """
+    if not raw:
+        return "gemini-3-flash-preview"
+    s = raw.strip().strip('"').strip("'")
+    # REST resource name from docs / copy-paste
+    if s.lower().startswith("models/"):
+        s = s.split("/", 1)[1].strip()
+    # OpenRouter-style slug (never valid for google.genai)
+    if "/" in s:
+        s = s.split("/")[-1].strip()
+    key = s.lower().replace(" ", "")
+    aliases = {
+        "gemini-3-flash": "gemini-3-flash-preview",
+        "gemini3flash": "gemini-3-flash-preview",
+        "gemini-3.0-flash": "gemini-3-flash-preview",
+        "gemini-3-flash-latest": "gemini-3-flash-preview",
+    }
+    return aliases.get(key, s)
+
+
+def _gemini_disable_tools() -> bool:
+    v = (_env_str("GEMINI_DISABLE_TOOLS") or "").lower()
+    return v in ("1", "true", "yes", "on")
 
 
 # Load API Keys (path: this package dir — cwd may not be ml_backend when using uvicorn)
 # override=True: stale Windows/User env vars (e.g. LLM_API_KEY) must not shadow ml_backend/.env
-load_dotenv(Path(__file__).resolve().parent / ".env", override=True)
-load_dotenv(override=True)
+# Do NOT call load_dotenv() again without a path: override=True would let a repo-root .env
+# overwrite these values and bring back bad LLM_MODEL strings (e.g. gemini-3-flash).
+_ML_BACKEND_ENV = Path(__file__).resolve().parent / ".env"
 
 
-def _openrouter_key_only() -> str | None:
-    """Keys meant for OpenRouter (never use GROQ_API_KEY here)."""
-    return _env_api_key("OP_ROUTER", "OPENROUTER_API_KEY", "LLM_API_KEY")
+def _reload_ml_backend_env() -> None:
+    """Re-apply ml_backend/.env so edits + correct model ids apply without guessing cwd."""
+    load_dotenv(_ML_BACKEND_ENV, override=True)
 
 
-def _http_llm_key() -> str | None:
-    """
-    Read at use-time so .env is visible even if this module imported early.
-
-    OP_ROUTER / OPENROUTER_API_KEY are checked before LLM_API_KEY so a bad LLM_API_KEY
-    in the environment does not shadow a good OP_ROUTER in .env.
-
-    Canonical OpenRouter .env:
-      OP_ROUTER=sk-or-v1-...  (or OPENROUTER_API_KEY / LLM_API_KEY)
-      LLM_BASE_URL=https://openrouter.ai/api/v1
-      LLM_MODEL=provider/model
-    Groq: GROQ_API_KEY + LLM_BASE_URL=https://api.groq.com/openai/v1
-    """
-    return _env_api_key(
-        "OP_ROUTER",
-        "OPENROUTER_API_KEY",
-        "LLM_API_KEY",
-        "GROQ_API_KEY",
-    )
+_reload_ml_backend_env()
 
 
-def _ping_openrouter(base: str, headers: Mapping[str, str]) -> None:
-    """One GET /models with the same auth headers OpenRouter expects."""
-    if _env_str("LLM_SKIP_VERIFY"):
-        return
-    try:
-        import httpx
-
-        url = f"{base.rstrip('/')}/models"
-        r = httpx.get(url, headers=dict(headers), timeout=25.0)
-        if r.status_code == 200:
-            print("✓ OpenRouter: API key accepted (GET /models OK).")
-        else:
-            print(
-                f"⚠️  OpenRouter: GET /models → {r.status_code}. "
-                f"If 401: key or account issue on OpenRouter's side. Snippet: {r.text[:280]!r}"
-            )
-    except Exception as e:
-        print(f"⚠️  OpenRouter verify (GET /models) failed: {e}")
+def _gemini_api_key() -> str | None:
+    """Google AI Studio usually provides GOOGLE_API_KEY; GEMINI_API_KEY is an alias."""
+    return _env_api_key("GOOGLE_API_KEY", "GEMINI_API_KEY")
 
 
 DEFAULT_USER_ID = "356721c8-1559-4c00-9aec-8be06d861028"
@@ -129,92 +125,92 @@ MAX_TOOL_CALLS = 5
 
 class SecurityAI:
     def __init__(self):
-        # Resolve keys after load_dotenv (avoid stale module-level reads).
-        http_key = _http_llm_key()
-        gemini_key = _env_api_key("GEMINI_API_KEY")
-
-        if http_key:
-            self._ai_mode = "HTTP"
-        elif gemini_key:
-            self._ai_mode = "GEMINI"
-        else:
+        _reload_ml_backend_env()
+        gemini_key = _gemini_api_key()
+        if gemini_key:
+            gemini_key = "".join(gemini_key.split())
+        if not gemini_key:
             raise ValueError(
-                "No LLM API key configured. OpenRouter: OP_ROUTER or OPENROUTER_API_KEY "
-                "or LLM_API_KEY, plus LLM_BASE_URL and LLM_MODEL. "
-                "Groq: GROQ_API_KEY + LLM_BASE_URL. Gemini: GEMINI_API_KEY."
+                "Gemini mode requires GOOGLE_API_KEY or GEMINI_API_KEY in .env."
             )
+        self._ai_mode = "GEMINI"
 
         print(f"🤖 Initializing AI in {self._ai_mode} mode...")
-        self.model = None
-        self.client = None
-        self.model_name = ""
-        # httpx/OpenAI sync client is not thread-safe; parallel category summaries corrupted headers (401).
-        self._http_lock = threading.Lock()
+        self.gemini_client = None
+        self.gemini_model_id = ""
+        self._gemini_lock = threading.Lock()
+        from google import genai
+        from google.genai import types as genai_types
 
-        if self._ai_mode == "HTTP":
-            base = _env_url("LLM_BASE_URL") or "https://openrouter.ai/api/v1"
-            if "openrouter.ai" in base.lower():
-                # Never send Groq (or other) keys to OpenRouter — use only OR* / LLM_API_KEY.
-                or_key = _openrouter_key_only()
-                if or_key:
-                    http_key = or_key
-                elif _env_api_key("GROQ_API_KEY"):
-                    print(
-                        "⚠️  LLM_BASE_URL is OpenRouter but only GROQ_API_KEY is set. "
-                        "Set OP_ROUTER or OPENROUTER_API_KEY (sk-or-v1-... from openrouter.ai/keys)."
-                    )
-            # Newlines / stray chars from .env breaks Bearer token.
-            http_key = "".join(http_key.split())
-            # OpenAI-compatible client; force Authorization on every request.
-            hdrs: dict[str, str] = {"Authorization": f"Bearer {http_key}"}
-            if "openrouter.ai" in base.lower():
-                hdrs["HTTP-Referer"] = os.getenv(
-                    "OPENROUTER_HTTP_REFERER", "https://localhost"
-                )
-                hdrs["X-Title"] = os.getenv(
-                    "OPENROUTER_APP_TITLE", "DSCIML Forensics"
-                )
-                if not http_key.startswith("sk-or-"):
-                    print(
-                        "⚠️  OpenRouter API keys usually start with sk-or-v1-. "
-                        "401 User not found = OpenRouter does not recognize this token."
-                    )
-                _ping_openrouter(base, hdrs)
-            self.client = OpenAI(
-                api_key=http_key,
-                base_url=base,
-                default_headers=hdrs,
+        raw_model = (
+            _env_str("GEMINI_MODEL")
+            or _env_str("LLM_MODEL")
+            or "gemini-3-flash-preview"
+        )
+        gemini_model = _canonical_gemini_model_id(raw_model)
+        if gemini_model != raw_model:
+            print(
+                f"  (Gemini model: {raw_model!r} -> using API id {gemini_model!r})"
             )
-            self.model_name = _env_str("LLM_MODEL") or "stepfun/step-3.5-flash"
         else:
-            # Gemini (not OpenAI-compatible; optional custom endpoint for Vertex / proxies)
-            warnings.filterwarnings("ignore", message=".*google.generativeai.*")
-            genai = importlib.import_module("google.generativeai")
-            gemini_model = (
-                _env_str("LLM_MODEL")
-                or _env_str("GEMINI_MODEL")
-                or "gemini-1.5-flash-latest"
+            print(f"  (Gemini model: {gemini_model})")
+        endpoint = _env_url("GEMINI_API_BASE")
+        http_options = (
+            genai_types.HttpOptions(base_url=endpoint) if endpoint else None
+        )
+        self.gemini_client = genai.Client(
+            api_key=gemini_key,
+            http_options=http_options,
+        )
+        self.gemini_model_id = gemini_model
+        if _gemini_disable_tools():
+            print(
+                "  (GEMINI_DISABLE_TOOLS=1: one generateContent per category — fewer 429s.)"
             )
-            endpoint = _env_url("GEMINI_API_BASE")
-            if endpoint:
-                try:
-                    from google.api_core import client_options as gco
 
-                    genai.configure(
-                        api_key=gemini_key,
-                        client_options=gco.ClientOptions(api_endpoint=endpoint),
-                    )
-                except Exception:
-                    genai.configure(api_key=gemini_key)
-            else:
-                genai.configure(api_key=gemini_key)
-            self.model = genai.GenerativeModel(gemini_model)
+    def _gemini_effective_model_id(self) -> str:
+        """
+        Re-read .env on every call. main_api caches a single SecurityAI instance; without this,
+        an old bad LLM_MODEL (e.g. gemini-3-flash) sticks until full process restart.
+        """
+        _reload_ml_backend_env()
+        raw = (
+            _env_str("GEMINI_MODEL")
+            or _env_str("LLM_MODEL")
+            or (self.gemini_model_id or None)
+            or "gemini-3-flash-preview"
+        )
+        return _canonical_gemini_model_id(raw)
 
-    def _http_chat(self, **kwargs):
-        """Thread-safe chat.completions (shared httpx client is not concurrent-safe)."""
-        assert self.client is not None
-        with self._http_lock:
-            return self.client.chat.completions.create(**kwargs)
+    def _gemini_generate_content(self, contents, config=None):
+        assert self.gemini_client is not None
+        model_id = self._gemini_effective_model_id()
+        with self._gemini_lock:
+            return self.gemini_client.models.generate_content(
+                model=model_id,
+                contents=contents,
+                config=config,
+            )
+
+    @staticmethod
+    def _gemini_text_from_response(response) -> str | None:
+        """Prefer SDK ``response.text`` (handles Gemini 3 multi-part replies); else join parts."""
+        if response is None:
+            return None
+        aggregated = getattr(response, "text", None)
+        if isinstance(aggregated, str) and aggregated.strip():
+            return aggregated
+        if not response.candidates:
+            return None
+        content = response.candidates[0].content
+        if not content or not content.parts:
+            return None
+        chunks = [
+            p.text
+            for p in content.parts
+            if getattr(p, "text", None) and str(p.text).strip()
+        ]
+        return "\n".join(chunks) if chunks else None
 
     def _resolve_scan_context(self, scan_id=None, user_id=DEFAULT_USER_ID):
         db = SessionLocal()
@@ -297,6 +293,95 @@ class SecurityAI:
         finally:
             db.close()
 
+    def _scan_facts_for_briefing(self, scan_id) -> dict:
+        """Ground-truth times and counts from DB so the executive summary is not vague."""
+        db = SessionLocal()
+        try:
+            scan = db.query(Scan).filter(Scan.scan_id == scan_id).first()
+            if not scan:
+                return {}
+            sid = str(scan_id)
+            agg = db.execute(
+                text(
+                    """
+                    SELECT
+                        MIN(ae.time_logged) AS first_ts,
+                        MAX(ae.time_logged) AS last_ts,
+                        COUNT(*) AS event_rows
+                    FROM anomalous_events ae
+                    JOIN anomaly_categories ac ON ac.category_id = ae.category_id
+                    WHERE ae.scan_id = CAST(:sid AS uuid)
+                      AND ac.category_name <> 'Normal'
+                    """
+                ),
+                {"sid": sid},
+            ).mappings().first()
+            per_cat = db.execute(
+                text(
+                    """
+                    SELECT
+                        ac.category_name,
+                        ac.mitre_id,
+                        ac.tactic,
+                        ac.risk_score AS category_risk_score,
+                        MIN(ae.time_logged) AS first_ts,
+                        MAX(ae.time_logged) AS last_ts,
+                        COUNT(*) AS cnt
+                    FROM anomalous_events ae
+                    JOIN anomaly_categories ac ON ac.category_id = ae.category_id
+                    WHERE ae.scan_id = CAST(:sid AS uuid)
+                      AND ac.category_name <> 'Normal'
+                    GROUP BY
+                        ac.category_id,
+                        ac.category_name,
+                        ac.mitre_id,
+                        ac.tactic,
+                        ac.risk_score
+                    ORDER BY COUNT(*) DESC
+                    """
+                ),
+                {"sid": sid},
+            ).mappings().all()
+            return {
+                "scan_id": sid,
+                "file_name": scan.file_name,
+                "generated_at": scan.generated_at.isoformat() if scan.generated_at else None,
+                "total_logs": scan.total_logs,
+                "total_threats": scan.total_threats,
+                "risk_score": scan.risk_score,
+                "anomaly_log_window": {
+                    "first_observed": agg["first_ts"].isoformat()
+                    if agg and agg.get("first_ts")
+                    else None,
+                    "last_observed": agg["last_ts"].isoformat()
+                    if agg and agg.get("last_ts")
+                    else None,
+                    "stored_anomaly_event_rows": int(agg["event_rows"] or 0)
+                    if agg
+                    else 0,
+                },
+                "categories_time_ranges": [
+                    {
+                        "category": r["category_name"],
+                        "tactic": r.get("tactic"),
+                        "mitre_id": r.get("mitre_id"),
+                        "category_risk_score": int(r["category_risk_score"])
+                        if r.get("category_risk_score") is not None
+                        else None,
+                        "first_observed": r["first_ts"].isoformat()
+                        if r.get("first_ts")
+                        else None,
+                        "last_observed": r["last_ts"].isoformat()
+                        if r.get("last_ts")
+                        else None,
+                        "event_rows": int(r["cnt"] or 0),
+                    }
+                    for r in per_cat
+                ],
+            }
+        finally:
+            db.close()
+
     def _db_lookup_tool(self, query, scan_id, user_id):
         """Execute SELECT query on anomalous_events table for tool calls."""
         if not isinstance(query, str) or not query.strip().lower().startswith('select'):
@@ -322,169 +407,181 @@ class SecurityAI:
         finally:
             db.close()
 
+    def _category_strict_prompt(self, category_payload, category_name):
+        return f"""
+Role: Security Analyst (STRICT MODE)
+
+You are analyzing real security logs.
+DO NOT assume anything not present in the data.
+
+RULES:
+- Only use the provided data
+- DO NOT infer attack types (APT, malware, exfiltration, etc.)
+- DO NOT generate IPs, domains, or techniques unless explicitly present
+- If something is unknown -> say "Not observed"
+- Keep output concise and factual
+
+DATA:
+{json.dumps(category_payload, cls=UUIDEncoder)}
+
+OUTPUT FORMAT:
+
+Category: {category_name}
+
+1. Classification rationale:
+- Pipeline metadata: copy tactic, mitre_id, risk_score from DATA exactly (use "Not observed" if missing)
+- Log evidence: up to 3 bullets — only task_category, users, computers, or counts from DATA.groups that explain why this category name applies (no new MITRE or tactics not in DATA)
+
+2. Observed Activity:
+- (what actually happened based on logs)
+
+3. Affected Entities:
+- Users:
+- Devices:
+
+4. Time Range:
+- Start:
+- End:
+
+5. Event Summary:
+- Total Events:
+- Pattern:
+
+6. Indicators:
+- IPs: (only if present)
+- Domains: (only if present)
+
+7. Risk Level:
+- Low / Medium / High (based only on event frequency or severity field)
+
+8. Notes:
+- Any limitations in data based on ml data
+
+DO NOT ADD ANY EXTRA EXPLANATION.
+"""
+
     def _summarize_category_openai(self, category_payload, scan_id, user_id):
         """
-        Summarize a category using the HTTP LLM (OpenAI-compatible) or Gemini.
+        Gemini-only category summary entrypoint.
         """
-        if self._ai_mode == "HTTP":
-            return self._summarize_category_groq_with_tools(category_payload, scan_id, user_id)
+        if _gemini_disable_tools():
+            return self._summarize_category_gemini_plain(category_payload, scan_id, user_id)
         return self._summarize_category_gemini_with_tools(category_payload, scan_id, user_id)
 
-    def _summarize_category_groq_with_tools(self, category_payload, scan_id, user_id):
-        """Summarize using OpenAI-compatible chat API (grouped DB payload; no tool calls)."""
-        category_name = category_payload['category_name']
-        
-        prompt = f"""
-        Role: Senior SOC Forensic Lead
-        Task: Perform forensic deep-dive on attack category: {category_name}
-        
-        MITRE ID: {category_payload.get('mitre_id')} | TACTIC: {category_payload.get('tactic')} | Risk: {category_payload.get('risk_score')}/10
-        
-        GROUPED INCIDENT DATA (pre-aggregated from database):
-        {json.dumps(category_payload, cls=UUIDEncoder, indent=2)}
-        
-        REQUIRED ANALYSIS:
-        1) TIMELINE: Exact hours/dates when attack occurred
-        2) ENTRY POINTS: How intruders initially compromised the system (attack vector, protocols, ports)
-        3) SOURCE IPs & INFRASTRUCTURE: All suspicious IPs, domains, or external systems involved
-        4) ATTACK METHODOLOGY: Step-by-step technique breakdown (lateral movement, privilege escalation, persistence)
-        5) AFFECTED ENTITIES: Specific users, computers, accounts, and scope of compromise
-        6) IMPACT & RISK: Severity, data exposure, system availability impact
-        7) REMEDIATION: Immediate containment steps and long-term hardening
-        
-        Produce a comprehensive technical Markdown summary with findings and remediation.
-        """
-        
+    def _summarize_category_gemini_plain(self, category_payload, scan_id, user_id):
+        """Single generateContent per category (no db_lookup tool loop) — far fewer API calls / 429s."""
+        category_name = category_payload["category_name"]
+        prompt = self._category_strict_prompt(category_payload, category_name)
         for attempt in range(3):
             try:
-                print(f"📡 [{self._ai_mode}] Analyzing category: '{category_name}'...")
-                
-                messages = [
-                    {"role": "system", "content": "You are a Senior SOC Forensic Lead analyzing security incidents from aggregated database data."},
-                    {"role": "user", "content": prompt}
-                ]
-                
-                response = self._http_chat(
-                    model=self.model_name,
-                    messages=messages,
-                    max_tokens=2000,
-                )
-                
-                return _completion_text(response)
-                
+                print(f"📡 [Gemini] Analyzing category: '{category_name}'...")
+                response = self._gemini_generate_content(prompt)
+                t = self._gemini_text_from_response(response)
+                if t:
+                    return t
+                return "No summary generated."
             except Exception as e:
-                if "429" in str(e) or "rate" in str(e).lower():
-                    wait = 30
+                err = str(e).lower()
+                if (
+                    "429" in str(e)
+                    or "rate" in err
+                    or "resource exhausted" in err
+                    or "quota" in err
+                ):
+                    wait = _rate_limit_backoff_seconds(attempt)
                     print(f"⚠️ Rate limited. Waiting {wait}s...")
                     time.sleep(wait)
                     continue
-                print(f"⚠️ Error in HTTP LLM summarization: {e}")
+                print(f"⚠️ Error in Gemini summarization: {e}")
                 return f"Error: {e}"
-        
         return "Failed after retries."
 
     def _summarize_category_gemini_with_tools(self, category_payload, scan_id, user_id):
-        """Summarize using Gemini with db_lookup tool support."""
+        """Summarize using Gemini (google.genai) with db_lookup tool support."""
+        from google.genai import types as genai_types
+
         category_name = category_payload['category_name']
-        
-        # Define the tool for Gemini
-        tool = {
-            "type": "function",
-            "function": {
-                "name": "db_lookup",
-                "description": "Query the anomalous_events table to verify raw event details for forensic analysis.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "SELECT query to run against anomalous_events table. Use :scan_id and :user_id parameters."
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
-        }
-        
-        prompt = f"""
-        Role: Senior SOC Forensic Lead
-        Task: Perform forensic deep-dive on attack category: {category_name}
-        
-        MITRE ID: {category_payload.get('mitre_id')} | TACTIC: {category_payload.get('tactic')} | Risk: {category_payload.get('risk_score')}/10
-        
-        GROUPED INCIDENT DATA (pre-aggregated from database):
-        {json.dumps(category_payload, cls=UUIDEncoder, indent=2)}
-        
-        You may query the anomalous_events database table via the db_lookup function (max 5 calls) to:
-        - Verify specific event details
-        - Extract source IPs, timestamps, or user accounts
-        - Confirm attack progression
-        
-        REQUIRED ANALYSIS:
-        1) TIMELINE: Exact hours/dates when attack occurred
-        2) ENTRY POINTS: How intruders initially compromised the system (attack vector, protocols, ports)
-        3) SOURCE IPs & INFRASTRUCTURE: All suspicious IPs, domains, or external systems involved
-        4) ATTACK METHODOLOGY: Step-by-step technique breakdown (lateral movement, privilege escalation, persistence)
-        5) AFFECTED ENTITIES: Specific users, computers, accounts, and scope of compromise
-        6) IMPACT & RISK: Severity, data exposure, system availability impact
-        7) REMEDIATION: Immediate containment steps and long-term hardening
-        
-        Produce a comprehensive technical Markdown summary with findings and remediation.
-        """
+
+        def db_lookup(query: str):
+            """Query the anomalous_events table to verify raw event details for forensic analysis.
+
+            Args:
+                query: SELECT query to run against anomalous_events table. Use :scan_id and :user_id parameters.
+            """
+            return self._db_lookup_tool(query, scan_id, user_id)
+
+        tool_cfg = genai_types.GenerateContentConfig(
+            tools=[db_lookup],
+            automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                disable=True
+            ),
+        )
+
+        prompt = self._category_strict_prompt(category_payload, category_name)
         
         for attempt in range(3):
             try:
-                print(f"📡 [Gemini + Tools] Analyzing category: '{category_payload['category_name']}'...")
-                response = self.model.generate_content(
-                    prompt,
-                    tools=[tool]
+                print(
+                    f"📡 [Gemini + Tools] Analyzing category: '{category_payload['category_name']}'..."
                 )
-                
-                # Handle tool calls if any
+                conversation: list = [
+                    genai_types.UserContent(parts=[genai_types.Part(text=prompt)])
+                ]
                 tool_calls = 0
-                while response.candidates and response.candidates[0].content.parts:
-                    last_part = response.candidates[0].content.parts[-1]
-                    
-                    # Check if there's a function call
-                    if hasattr(last_part, 'function_call'):
+
+                while True:
+                    response = self._gemini_generate_content(
+                        conversation, config=tool_cfg
+                    )
+                    text = self._gemini_text_from_response(response)
+                    if not response.candidates:
+                        return text or "No summary generated."
+
+                    content = response.candidates[0].content
+                    if not content or not content.parts:
+                        return text or "No summary generated."
+
+                    func_calls = [
+                        p.function_call
+                        for p in content.parts
+                        if p.function_call is not None
+                    ]
+                    if not func_calls:
+                        return text or "No summary generated."
+
+                    if tool_calls >= MAX_TOOL_CALLS:
+                        return text or "No summary generated."
+
+                    conversation.append(content)
+                    resp_parts = []
+                    for fc in func_calls:
                         if tool_calls >= MAX_TOOL_CALLS:
                             break
-                        
                         tool_calls += 1
-                        func_call = last_part.function_call
-                        query = func_call.args.get('query', '')
-                        
-                        # Execute the DB lookup
-                        result = self._db_lookup_tool(query, scan_id, user_id)
-                        
-                        # Continue conversation with tool result
-                        response = self.model.generate_content(
-                            [
-                                prompt,
-                                response.candidates[0].content,
-                                {
-                                    "role": "user",
-                                    "parts": [
-                                        f"Tool result for db_lookup:\n{json.dumps(result)}"
-                                    ]
-                                }
-                            ],
-                            tools=[tool]
+                        q = (fc.args or {}).get("query", "")
+                        result = self._db_lookup_tool(str(q), scan_id, user_id)
+                        fr = genai_types.FunctionResponse(
+                            name=fc.name or "db_lookup",
+                            response=result,
+                            id=fc.id,
                         )
-                    else:
-                        # No more tool calls, we have the final response
-                        break
-                
-                # Extract final text response
-                if response.candidates and response.candidates[0].content.parts:
-                    for part in response.candidates[0].content.parts:
-                        if hasattr(part, 'text'):
-                            return part.text
-                
-                return "No summary generated."
+                        resp_parts.append(
+                            genai_types.Part(function_response=fr)
+                        )
+                    if not resp_parts:
+                        return text or "No summary generated."
+                    conversation.append(
+                        genai_types.UserContent(parts=resp_parts)
+                    )
             except Exception as e:
-                if "429" in str(e) or "rate" in str(e).lower():
-                    wait = 60
+                err = str(e).lower()
+                if (
+                    "429" in str(e)
+                    or "rate" in err
+                    or "resource exhausted" in err
+                    or "quota" in err
+                ):
+                    wait = _rate_limit_backoff_seconds(attempt)
                     print(f"⚠️ Rate limited. Waiting {wait}s...")
                     time.sleep(wait)
                     continue
@@ -494,7 +591,7 @@ class SecurityAI:
         return "Failed after retries."
 
     def analyze_category(self, category, events):
-        """Analyzes events using the HTTP LLM (OpenAI-compatible client)."""
+        """Analyzes events using Gemini."""
         sample_size = 500
         sample_data = events[:sample_size]
         
@@ -526,80 +623,99 @@ class SecurityAI:
         for attempt in range(3):
             try:
                 print(f"📡 [{self._ai_mode}] Analyzing '{category}'...")
-                messages = [
-                    {"role": "system", "content": "You are a Senior SOC Analyst."},
-                    {"role": "user", "content": prompt}
-                ]
-                response = self._http_chat(
-                    model=self.model_name,
-                    messages=messages,
-                    max_tokens=1500,
-                )
-                return _completion_text(response)
+                response = self._gemini_generate_content(prompt)
+                txt = self._gemini_text_from_response(response)
+                return txt if txt else "No analysis generated."
             except Exception as e:
-                if "429" in str(e):
-                    wait = 30
+                if "429" in str(e) or "rate" in str(e).lower():
+                    wait = _rate_limit_backoff_seconds(attempt)
                     print(f"⚠️ Rate limited. Waiting {wait}s...")
                     time.sleep(wait)
                     continue
                 return f"Error: {e}"
         return "Failed after retries."
 
-    def generate_final_briefing(self, partial_summaries):
+    def _executive_briefing_strict_prompt(
+        self, partial_summaries: list[str], scan_facts: dict | None = None
+    ) -> str:
+        """One short scan-level briefing. No Mermaid — long CISO prompts hit default max tokens and truncate mid-sentence."""
+        joined = chr(10).join(partial_summaries)
+        cap = max(200, int(_env_float("AI_BRIEFING_MAX_INPUT_CHARS", 120_000)))
+        if len(joined) > cap:
+            joined = joined[:cap] + "\n[Category summaries truncated for briefing.]"
+        facts_json = json.dumps(scan_facts or {}, cls=UUIDEncoder, indent=2)
+        return f"""Role: Security Analyst (dashboard briefing only)
+
+You must produce a complete briefing in plain text. Do not stop early. No Mermaid, no markdown tables, no emoji.
+
+RULES:
+- Copy timestamps and row counts from SCAN_FACTS exactly when present; never invent times.
+- For each category use tactic, mitre_id, category_risk_score from SCAN_FACTS when present; never invent MITRE IDs.
+- Use CATEGORY SUMMARIES for behavior (what happened); add 2–4 sentences per category explaining why the label fits, tied to summary + pipeline fields.
+- Keep total output compact (aim ~30–45 lines) but include EVERY section below with real content.
+
+SCAN_FACTS (database):
+{facts_json}
+
+CATEGORY SUMMARIES:
+{joined}
+
+OUTPUT — mandatory structure. Print each heading below EXACTLY as a single line, then its bullets. Do not merge sections into one paragraph. Do not skip a heading.
+
+Scan overview
+- File / scan: file_name and generated_at from SCAN_FACTS
+- 2–3 sentences: what the scan shows overall (from summaries + SCAN_FACTS)
+
+Timeline
+- first_observed -> last_observed from SCAN_FACTS.anomaly_log_window (or say not in DB)
+- stored anomaly event row count from SCAN_FACTS
+
+Categories
+- For each row in SCAN_FACTS.categories_time_ranges (in order): write a mini-block:
+  Line A: category name; ISO time window; event_rows
+  Line B: Pipeline classification — tactic, mitre_id, category_risk_score (copy from SCAN_FACTS; write "none" if a field is null)
+  Line C–D: Why this category — 2–4 sentences using that category's block in CATEGORY SUMMARIES plus Line B (behavior + rationale; no invented techniques)
+  (If categories_time_ranges empty, say none.)
+
+Risk
+- One line: total_logs, total_threats, risk_score from SCAN_FACTS
+
+Next step
+- One concrete action from the summaries
+
+End after the Next step bullet. No preamble, no conclusion paragraph after that."""
+
+    def generate_final_briefing(
+        self, partial_summaries: list[str], scan_facts: dict | None = None
+    ):
         if not partial_summaries:
             return "No threats to summarize."
 
-        prompt = f"""
-        Role: Chief Information Security Officer (CISO)
-        Task: Create a High-Fidelity Forensic Incident Report from the following categorical findings.
-        
-        SUMMARIES:
-        {chr(10).join(partial_summaries)}
-        
-        REPORT REQUIREMENTS:
-        - Use professional, formal security terminology.
-        - Include an Executive Summary (The "Elevator Pitch").
-        - Create a comprehensive "Master Attack Chain" using a Mermaid `sequenceDiagram` or `graph TD` that links multiple categories together.
-        - Provide a 'Global Remediation & Hardening' section.
-        - Ensure all sections have deep technical justification based on the summaries provided.
-        
-        FORMAT:
-        # 🛡️ GLOBAL FORENSIC INCIDENT REPORT
-        ## 🏁 Executive Summary
-        ## 📉 Aggregated Threat Analytics
-        ## 🗺️ Visual Attack Flow (Mermaid)
-        ## 👤 Identified Compromised Entities
-        ## 🛡️ Strategic Remediation Plan
-        """
+        from google.genai import types as genai_types
+
+        prompt = self._executive_briefing_strict_prompt(
+            partial_summaries, scan_facts=scan_facts
+        )
+        # max_output_tokens = ceiling the model may use, not a target length; too small causes mid-sentence cuts.
+        # Set AI_BRIEFING_MAX_OUTPUT_TOKENS=0 to omit (use API/model default). Default ~3k is plenty for this format.
+        raw_cap = _env_float("AI_BRIEFING_MAX_OUTPUT_TOKENS", 3072)
+        cfg = None
+        if raw_cap > 0:
+            cfg = genai_types.GenerateContentConfig(
+                max_output_tokens=max(512, int(raw_cap)),
+            )
         try:
-            if self.client is not None:
-                messages = [
-                    {
-                        "role": "system",
-                        "content": "You are a CISO creating a forensic report.",
-                    },
-                    {"role": "user", "content": prompt},
-                ]
-                response = self._http_chat(
-                    model=self.model_name,
-                    messages=messages,
-                    max_tokens=2000,
-                )
-                return _completion_text(response)
-            if self.model is not None:
-                r = self.model.generate_content(prompt)
-                if r.candidates and r.candidates[0].content.parts:
-                    for part in r.candidates[0].content.parts:
-                        if hasattr(part, "text"):
-                            return part.text
-                return "No briefing generated."
+            if self.gemini_client is not None:
+                r = self._gemini_generate_content(prompt, config=cfg)
+                t = self._gemini_text_from_response(r)
+                return t if t else "No briefing generated."
             return "Error: no LLM client configured."
         except Exception as e:
             return f"Error: {e}"
 
     def answer_question(self, question, scan_id=None):
         """
-        Answer a security question about a specific scan (OpenAI-compatible or Gemini).
+        Answer a security question about a specific scan (Gemini only).
         All data comes from the database, not local files.
         """
         if not scan_id:
@@ -638,31 +754,14 @@ class SecurityAI:
             for attempt in range(3):
                 try:
                     print(f"📡 [{self._ai_mode}] Answering question...")
-                    if self.client is not None:
-                        messages = [
-                            {
-                                "role": "system",
-                                "content": "You are a precise SOC Forensic Analyst.",
-                            },
-                            {"role": "user", "content": prompt},
-                        ]
-                        response = self._http_chat(
-                            model=self.model_name,
-                            messages=messages,
-                            max_tokens=1000,
-                        )
-                        return _completion_text(response)
-                    if self.model is not None:
-                        r = self.model.generate_content(prompt)
-                        if r.candidates and r.candidates[0].content.parts:
-                            for part in r.candidates[0].content.parts:
-                                if hasattr(part, "text"):
-                                    return part.text
-                        return "No answer generated."
+                    if self.gemini_client is not None:
+                        r = self._gemini_generate_content(prompt)
+                        t = self._gemini_text_from_response(r)
+                        return t if t else "No answer generated."
                     return "Error: no LLM client configured."
                 except Exception as e:
                     if "429" in str(e) or "rate" in str(e).lower():
-                        wait = 30
+                        wait = _rate_limit_backoff_seconds(attempt)
                         print(f"⚠️ Rate limited. Waiting {wait}s...")
                         time.sleep(wait)
                         continue
@@ -686,6 +785,9 @@ class SecurityAI:
         print(f"🚀 Summarizing {len(grouped_payload)} categories for scan {target_scan.scan_id}...")
 
         category_summaries = {}
+        # Pace requests so preview-tier RPM limits are less likely to trip (each category may
+        # issue multiple generateContent calls when tools are used). Set GEMINI_CATEGORY_DELAY_SEC=2–5 if needed.
+        between_cat_delay = _env_float("GEMINI_CATEGORY_DELAY_SEC", 0.0)
         # One worker: httpx OpenAI client is not thread-safe; lock serializes HTTP anyway.
         with ThreadPoolExecutor(max_workers=1) as executor:
             futures = {}
@@ -706,6 +808,8 @@ class SecurityAI:
                 except Exception as e:
                     print(f"⚠️ Failed to summarize {category_name}: {e}")
                     category_summaries[category_name] = f"Error: {e}"
+                if between_cat_delay > 0:
+                    time.sleep(between_cat_delay)
 
         db = SessionLocal()
         try:
@@ -724,10 +828,47 @@ class SecurityAI:
         ordered_summaries = [
             f"## {k}\n{v}" for k, v in category_summaries.items() if v
         ]
-        briefing = self.generate_final_briefing(ordered_summaries)
+        scan_facts = self._scan_facts_for_briefing(target_scan.scan_id)
+        briefing = self.generate_final_briefing(
+            ordered_summaries, scan_facts=scan_facts
+        )
         if not briefing or not str(briefing).strip():
             return "[Executive briefing: model returned no text.]"
         return briefing
+
+    def regenerate_executive_briefing_from_db(self, scan_id) -> str:
+        """
+        Rebuild the executive briefing from persisted category ai_summary rows + SCAN_FACTS
+        (same prompt as PDF/dashboard). Does not re-run per-category Gemini unless summaries are missing.
+        """
+        db = SessionLocal()
+        try:
+            sid = scan_id
+            cats = (
+                db.query(AnomalyCategory)
+                .filter(
+                    AnomalyCategory.scan_id == sid,
+                    AnomalyCategory.category_name != "Normal",
+                )
+                .order_by(AnomalyCategory.event_count.desc())
+                .all()
+            )
+            if not cats:
+                return "No anomaly categories in database for this scan."
+            ordered = [
+                f"## {c.category_name}\n{(c.ai_summary or '').strip()}"
+                for c in cats
+                if (c.ai_summary or "").strip()
+            ]
+            if not ordered:
+                return (
+                    "No category AI summaries stored. Run AI on this scan first "
+                    "(e.g. upload with run_ai=true, or POST workflow that populates ai_summary)."
+                )
+            facts = self._scan_facts_for_briefing(sid)
+            return self.generate_final_briefing(ordered, scan_facts=facts)
+        finally:
+            db.close()
 
 if __name__ == "__main__":
     ai = SecurityAI()
